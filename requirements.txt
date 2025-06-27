@@ -1,0 +1,10 @@
+streamlit
+tensorflow
+joblib
+opencv-python-headless
+pandas
+numpy
+shap
+matplotlib
+Pillow
+gdown
