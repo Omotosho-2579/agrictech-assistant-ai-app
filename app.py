@@ -106,7 +106,7 @@ with tabs[0]:
 label = class_names[class_idx]
 st.success(f"✅ Prediction: {label}")
 
-      # Leaf Disease Detection
+   # Leaf Disease Detection
 st.header("1. Leaf Disease Detection")
 uploaded_file = st.file_uploader("Upload a leaf image", type=["jpg", "png"])
 
@@ -120,8 +120,8 @@ if uploaded_file:
     predicted_label = disease_labels[class_idx]
     st.success(f"Prediction: {predicted_label}")
 
-    # ✅ Grad-CAM block properly placed inside
-    st.subheader("📊 Grad-CAM Heatmap")
+    # Grad-CAM Visualization
+    st.subheader("📊 Grad-CAM Heatmap")  # Must align with `if` block (4 spaces)
     try:
         heatmap = generate_gradcam(cnn_model, img_array, last_conv_layer_name="conv2d")
         heatmap_img = overlay_heatmap(heatmap, image)
