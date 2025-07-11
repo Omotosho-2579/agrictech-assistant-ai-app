@@ -106,28 +106,30 @@ with tabs[0]:
 label = class_names[class_idx]
 st.success(f"✅ Prediction: {label}")
 
-   # Leaf Disease Detection
-st.header("1. Leaf Disease Detection")
-uploaded_file = st.file_uploader("Upload a leaf image", type=["jpg", "png"])
+   # ---------------- Leaf Disease Detection tab ---------------- #
+with tabs[0]:
+    st.header("🦠 Leaf Disease Detection")
 
-if uploaded_file:
-    image = Image.open(uploaded_file).resize((224, 224))
-    st.image(image, caption="Uploaded Image", use_column_width=True)
-    img_array = np.expand_dims(np.array(image) / 255.0, axis=0)
-    
-    pred = cnn_model.predict(img_array)
-    class_idx = np.argmax(pred)
-    predicted_label = disease_labels[class_idx]
-    st.success(f"Prediction: {predicted_label}")
+    uploaded_file = st.file_uploader("Upload a leaf image", type=["jpg", "jpeg", "png"])
+    if uploaded_file:
+        image = Image.open(uploaded_file).convert("RGB")
+        st.image(image, caption="Uploaded Image", use_column_width=True)
 
-    # Grad-CAM Visualization
-    st.subheader("📊 Grad-CAM Heatmap")  # Must align with `if` block (4 spaces)
-    try:
-        heatmap = generate_gradcam(cnn_model, img_array, last_conv_layer_name="conv2d")
-        heatmap_img = overlay_heatmap(heatmap, image)
-        st.image(heatmap_img, caption="Grad-CAM", use_column_width=True)
-    except Exception as e:
-        st.error(f"Grad-CAM Error: {e}")
+        img_array = preprocess_image(image)                    # your helper
+        prediction = cnn_model.predict(img_array)[0]
+        class_idx = np.argmax(prediction)
+        label = class_names[class_idx]
+        st.success(f"✅ Prediction: {label}")
+
+        # 👉 Grad‑CAM block ‑‑ 4 spaces in from the if‑block
+        st.subheader("📊 Grad‑CAM Heatmap")
+        try:
+            heatmap = generate_gradcam(cnn_model, img_array, last_conv_layer_name="conv2d")
+            heatmap_img = overlay_heatmap(heatmap, image)
+            st.image(heatmap_img, caption="Grad‑CAM", use_column_width=True)
+        except Exception as e:
+            st.error(f"Grad‑CAM Error: {e}")
+
 
 # ------------------ TAB 2: Yield Prediction ------------------ #
 with tabs[1]:
