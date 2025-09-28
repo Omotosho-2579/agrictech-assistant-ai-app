@@ -8,3 +8,5 @@ shap
 matplotlib
 Pillow
 gdown
+scikit-learn
+
