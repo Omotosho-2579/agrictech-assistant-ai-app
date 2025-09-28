@@ -1,6 +1,5 @@
 streamlit==1.22.0
 tensorflow==2.19.0
-keras==2.19.0
 joblib
 opencv-python-headless==4.8.0.76
 pandas
