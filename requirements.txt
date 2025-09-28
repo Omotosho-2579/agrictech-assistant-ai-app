@@ -1,9 +1,9 @@
-streamlit
+streamlit==1.22.0
 tensorflow-cpu==2.11.0
 joblib
-opencv-python-headless==4.8.0.74
+opencv-python-headless==4.8.0.76
 pandas
-numpy
+numpy<2
 shap
 matplotlib
 Pillow
