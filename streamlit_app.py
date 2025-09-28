@@ -47,9 +47,7 @@ class_names = [
 # -------------------------
 @st.cache_resource
 def load_models():
-    """Load or download the disease detection and yield models.
-    Modify URLs if you have your models hosted elsewhere.
-    """
+    """Load or download the disease detection and yield models."""
     try:
         import gdown
     except Exception:
@@ -60,19 +58,20 @@ def load_models():
     # disease model (MobileNetV2-based expected)
     disease_model_path = "plant_disease_model_mobilenetv2.h5"
     if not os.path.exists(disease_model_path):
-        # Replace with your actual share link if needed
         disease_model_url = "https://drive.google.com/uc?id=1fBVg3K3Tiu_TPb7JnT8gAonic4yHqhte"
         try:
             gdown.download(disease_model_url, disease_model_path, quiet=True)
-        except Exception:
-            pass
+        except Exception as e:
+            st.error(f"Could not download disease model: {e}")
 
     disease_model = None
     if os.path.exists(disease_model_path):
         try:
-            disease_model = tf.keras.models.load_model(disease_model_path)
+            # FIX: use compile=False to avoid 'batch_shape' error
+            disease_model = tf.keras.models.load_model(disease_model_path, compile=False)
+            st.success("✅ Disease model loaded successfully")
         except Exception as e:
-            st.error(f"Error loading disease model: {e}")
+            st.error(f"❌ Error loading disease model: {e}")
 
     # yield prediction model (joblib pickle)
     yield_model_path = "yield_model.pkl"
@@ -80,15 +79,16 @@ def load_models():
         yield_model_url = "https://drive.google.com/uc?id=11kDYJhv-BAUj4sKmUby_QF9xGtu0NRPg"
         try:
             gdown.download(yield_model_url, yield_model_path, quiet=True)
-        except Exception:
-            pass
+        except Exception as e:
+            st.error(f"Could not download yield model: {e}")
 
     yield_model = None
     if os.path.exists(yield_model_path):
         try:
             yield_model = joblib.load(yield_model_path)
+            st.success("✅ Yield model loaded successfully")
         except Exception as e:
-            st.error(f"Error loading yield model: {e}")
+            st.error(f"❌ Error loading yield model: {e}")
 
     return disease_model, yield_model
 
@@ -99,7 +99,6 @@ def find_last_conv_layer(model):
         for layer in reversed(model.layers):
             if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D, tf.keras.layers.Conv1D)):
                 return layer.name
-        # fallback: look for 'conv' in layer names
         for layer in reversed(model.layers):
             if 'conv' in layer.name.lower():
                 return layer.name
@@ -109,21 +108,17 @@ def find_last_conv_layer(model):
 
 
 def get_img_array(img: Image.Image, size=(224, 224)):
-    """Convert PIL image to model-ready numpy array.
-    Uses MobileNetV2 preprocessing (you can change if your model expects different preprocess).
-    """
+    """Convert PIL image to model-ready numpy array."""
     img = img.convert('RGB')
     img_resized = img.resize(size)
     arr = np.array(img_resized).astype(np.float32)
-    arr = preprocess_input(arr)  # MobileNetV2-specific preprocessing
+    arr = preprocess_input(arr)
     arr = np.expand_dims(arr, axis=0)
     return arr
 
 
 def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
-    """Compute Grad-CAM heatmap for a prediction.
-    Returns a 2D heatmap (values 0..1).
-    """
+    """Compute Grad-CAM heatmap for a prediction."""
     grad_model = tf.keras.models.Model(
         [model.inputs], [model.get_layer(last_conv_layer_name).output, model.output]
     )
@@ -182,35 +177,28 @@ with tab1:
             image = Image.open(uploaded_file).convert('RGB')
             st.image(image, caption="Uploaded Image (preview)", use_column_width=True)
 
-            # Preprocess image for prediction
-            img_size = (224, 224)  # change if your model expects a different size
+            img_size = (224, 224)
             img_array = get_img_array(image, size=img_size)
 
             if disease_model is None:
-                st.error("Disease model is not loaded. Please check the model file path or logs.")
+                st.error("Disease model is not loaded.")
             else:
-                # Run prediction (handle logits vs sigmoid/softmax)
                 raw_preds = disease_model.predict(img_array)
 
-                # Convert to probabilities in a safe way
                 if raw_preds.ndim == 2 and raw_preds.shape[1] > 1:
                     probs = tf.nn.softmax(raw_preds, axis=-1).numpy()[0]
                 else:
-                    # binary/single-output model (sigmoid)
                     probs = tf.nn.sigmoid(raw_preds).numpy().reshape(-1)
 
-                # Safety: if model output size doesn't match class_names, show helpful error
                 if probs.shape[0] != len(class_names):
                     st.warning(
-                        f"Warning: model returns {probs.shape[0]} classes but class_names has {len(class_names)} entries.\n"
-                        "Results will display using available indices."
+                        f"Warning: model returns {probs.shape[0]} classes but class_names has {len(class_names)} entries."
                     )
 
                 pred_index = int(np.argmax(probs))
                 confidence = float(probs[pred_index]) * 100.0
                 pred_label = class_names[pred_index] if pred_index < len(class_names) else f"Class {pred_index}"
 
-                # Show primary prediction
                 st.success(f"Predicted Disease: **{pred_label}**")
                 st.info(f"Confidence Score: **{confidence:.2f}%**")
 
@@ -220,7 +208,6 @@ with tab1:
                 top_labels = [class_names[i] if i < len(class_names) else f"Class {i}" for i in top_indices]
                 top_scores = (probs[top_indices] * 100.0).tolist()
 
-                # Display uploaded image beside the top predictions chart
                 st.subheader("Uploaded Leaf & Top Predictions")
                 col1, col2 = st.columns([1, 2])
                 with col1:
@@ -239,7 +226,7 @@ with tab1:
                 st.subheader("Grad-CAM Explanation")
                 last_conv = find_last_conv_layer(disease_model)
                 if last_conv is None:
-                    st.error("Could not find a convolutional layer in the model for Grad-CAM.")
+                    st.error("Could not find a convolutional layer for Grad-CAM.")
                 else:
                     try:
                         heatmap = make_gradcam_heatmap(img_array, disease_model, last_conv, pred_index)
@@ -256,11 +243,9 @@ with tab2:
     st.header("Crop Yield Prediction and Explanation")
     st.write("Enter features used by the yield model and get a predicted yield with SHAP explanation.")
 
-    # Input layout
     st.subheader("Input Features")
     c1, c2, c3 = st.columns(3)
     with c1:
-        fertilizer = st.number_input("Fertilizer used (kg/ha)", value=0.0)
         N = st.number_input("Nitrogen (N)", value=0.0)
         P = st.number_input("Phosphorus (P)", value=0.0)
     with c2:
@@ -271,38 +256,29 @@ with tab2:
         humidity = st.number_input("Average Humidity (%)", value=0.0)
         pH = st.number_input("Soil pH", value=7.0, min_value=0.0, max_value=14.0, step=0.1)
 
-    # Predict button
     if st.button("Predict Yield"):
-        # Construct feature vector - adjust order to match how you trained your yield_model
-        features = np.array([[fertilizer, N, P, K, rainfall, temperature, humidity, pH]])
+        # ⚠️ FIX: removed undefined `fertilizer`
+        features = np.array([[N, P, K, rainfall, temperature, humidity, pH]])
 
         if yield_model is None:
-            st.error("Yield model is not loaded. Please check the model file path or logs.")
+            st.error("Yield model is not loaded.")
         else:
             try:
                 pred_yield = yield_model.predict(features)
-                # Some scikit models return array-like or nested arrays
-                if hasattr(pred_yield, '__len__'):
-                    pred_val = float(pred_yield[0])
-                else:
-                    pred_val = float(pred_yield)
+                pred_val = float(pred_yield[0]) if hasattr(pred_yield, '__len__') else float(pred_yield)
                 st.success(f"Predicted Crop Yield: **{pred_val:.2f}**")
 
-                # SHAP explanation (best-effort; may vary by model type)
+                # SHAP explanation
                 st.subheader("SHAP feature contributions")
                 try:
                     explainer = shap.Explainer(yield_model, np.zeros((1, features.shape[1])))
                     shap_values = explainer(features)
-
-                    # shap_values.values may have shape (1, n_features) or (n_outputs, n_features)
                     sv = np.array(shap_values.values)
-                    if sv.ndim == 3:  # sometimes (1, n_outputs, n_features)
+                    if sv.ndim == 3:
                         sv = sv[0]
                     shap_arr = sv[0] if sv.ndim == 2 and sv.shape[0] == 1 else sv
 
-                    feature_names = ["fertilizer", "N", "P", "K", "rainfall", "temperature", "humidity", "pH"]
-                    feature_names = feature_names[:features.shape[1]]
-
+                    feature_names = ["N", "P", "K", "rainfall", "temperature", "humidity", "pH"]
                     df_shap = pd.DataFrame({"feature": feature_names, "shap_value": shap_arr})
                     df_shap = df_shap.sort_values(by='shap_value', key=lambda x: np.abs(x), ascending=False)
 
@@ -320,7 +296,7 @@ with tab2:
                 st.error(f"Error making prediction: {e}")
 
 # -------------------------
-# Footer / notes
+# Footer
 # -------------------------
 st.markdown("---")
-st.caption("Notes: Make sure you use scaner to scan your leave for best result.")
+st.caption("Notes: Make sure you scan your leaf for best results.")
