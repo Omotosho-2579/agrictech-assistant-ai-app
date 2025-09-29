@@ -77,7 +77,7 @@ def load_models():
     yield_model_path = "yield2_model.pkl"
     if not os.path.exists(yield_model_path):
         # Updated Google Drive URL for yield2_model.pkl (you'll need to replace this with your actual URL)
-        yield_model_url = ""
+        yield_model_url = "https://drive.google.com/uc?id=YOUR_YIELD2_MODEL_DRIVE_ID_HERE"
         try:
             gdown.download(yield_model_url, yield_model_path, quiet=True)
         except Exception as e:
@@ -295,62 +295,156 @@ with tab1:
         except Exception as e:
             st.error(f"Error processing image: {e}")
 
-# -------- Tab 2: Yield Prediction & SHAP --------
+# -------- Tab 2: Crop Recommendation & SHAP --------
 with tab2:
-    st.header("Crop Yield Prediction and Explanation")
-    st.write("Enter features used by the yield model and get a predicted yield with SHAP explanation.")
+    st.header("Crop Recommendation and Explanation")
+    st.write("Enter soil and climate conditions to get crop recommendations with explanations.")
 
     st.subheader("Input Features")
     c1, c2, c3 = st.columns(3)
     with c1:
-        N = st.number_input("Nitrogen (N)", value=0.0)
-        P = st.number_input("Phosphorus (P)", value=0.0)
+        N = st.number_input("Nitrogen (N)", value=90.0, min_value=0.0, max_value=200.0)
+        P = st.number_input("Phosphorus (P)", value=42.0, min_value=0.0, max_value=150.0)
     with c2:
-        K = st.number_input("Potassium (K)", value=0.0)
-        rainfall = st.number_input("Annual Rainfall (mm)", value=0.0)
-        temperature = st.number_input("Average Temperature (°C)", value=0.0)
+        K = st.number_input("Potassium (K)", value=43.0, min_value=0.0, max_value=200.0)
+        temperature = st.number_input("Average Temperature (°C)", value=20.9, min_value=0.0, max_value=50.0)
+        humidity = st.number_input("Average Humidity (%)", value=82.0, min_value=0.0, max_value=100.0)
     with c3:
-        humidity = st.number_input("Average Humidity (%)", value=0.0)
-        pH = st.number_input("Soil pH", value=7.0, min_value=0.0, max_value=14.0, step=0.1)
+        pH = st.number_input("Soil pH", value=6.5, min_value=0.0, max_value=14.0, step=0.1)
+        rainfall = st.number_input("Annual Rainfall (mm)", value=202.9, min_value=0.0, max_value=500.0)
 
-    if st.button("Predict Yield"):
-        # ⚠️ FIX: removed undefined `fertilizer`
-        features = np.array([[N, P, K, rainfall, temperature, humidity, pH]])
+    if st.button("Get Crop Recommendation"):
+        features = np.array([[N, P, K, temperature, humidity, pH, rainfall]])
 
         if yield_model is None:
-            st.error("Yield2 model is not loaded.")
+            st.error("Crop recommendation model is not loaded.")
         else:
             try:
-                pred_yield = yield_model.predict(features)
-                pred_val = float(pred_yield[0]) if hasattr(pred_yield, '__len__') else float(pred_yield)
-                st.success(f"Predicted Crop Yield: **{pred_val:.2f}**")
+                # Check if it's a classification model
+                if hasattr(yield_model, 'predict_proba'):
+                    # Classification model - get crop recommendations
+                    prediction = yield_model.predict(features)
+                    probabilities = yield_model.predict_proba(features)
+                    
+                    # Get the predicted crop
+                    predicted_crop = prediction[0] if hasattr(prediction, '__len__') else prediction
+                    
+                    # Get all class probabilities
+                    if hasattr(yield_model, 'classes_'):
+                        classes = yield_model.classes_
+                        probs = probabilities[0] if probabilities.ndim > 1 else probabilities
+                        
+                        st.success(f"Recommended Crop: **{predicted_crop}**")
+                        
+                        # Show confidence
+                        max_prob_idx = np.argmax(probs)
+                        confidence = probs[max_prob_idx] * 100
+                        st.info(f"Confidence: **{confidence:.2f}%**")
+                        
+                        # Show top 3 recommendations
+                        st.subheader("Top 3 Crop Recommendations")
+                        top_3_idx = np.argsort(probs)[-3:][::-1]
+                        
+                        recommendations_data = []
+                        for idx in top_3_idx:
+                            recommendations_data.append({
+                                'Crop': classes[idx],
+                                'Suitability': f"{probs[idx] * 100:.2f}%"
+                            })
+                        
+                        df_recommendations = pd.DataFrame(recommendations_data)
+                        
+                        # Create visualization
+                        chart = alt.Chart(df_recommendations).mark_bar().encode(
+                            x=alt.X('Suitability:Q', title='Suitability (%)'),
+                            y=alt.Y('Crop:N', sort='-x', title='Recommended Crops'),
+                            color=alt.Color('Suitability:Q', scale=alt.Scale(scheme='greens')),
+                            tooltip=['Crop', 'Suitability']
+                        ).properties(height=200)
+                        
+                        st.altair_chart(chart, use_container_width=True)
+                        st.dataframe(df_recommendations, hide_index=True)
+                        
+                    else:
+                        st.success(f"Recommended Crop: **{predicted_crop}**")
+                
+                else:
+                    # Regression model - treat as yield prediction
+                    prediction = yield_model.predict(features)
+                    pred_val = float(prediction[0]) if hasattr(prediction, '__len__') else float(prediction)
+                    st.success(f"Predicted Yield: **{pred_val:.2f} tons/hectare**")
 
                 # SHAP explanation
-                st.subheader("SHAP feature contributions")
+                st.subheader("SHAP Feature Importance")
                 try:
-                    explainer = shap.Explainer(yield_model, np.zeros((1, features.shape[1])))
+                    # Create background dataset for SHAP
+                    background_data = np.array([[
+                        [50, 30, 30, 25, 70, 6.5, 150],  # Sample 1
+                        [100, 50, 50, 20, 80, 7.0, 200],  # Sample 2
+                        [80, 40, 40, 22, 75, 6.8, 180]   # Sample 3
+                    ]])
+                    
+                    explainer = shap.Explainer(yield_model, background_data.reshape(3, -1))
                     shap_values = explainer(features)
-                    sv = np.array(shap_values.values)
+                    
+                    # Handle different SHAP value formats
+                    if hasattr(shap_values, 'values'):
+                        sv = shap_values.values
+                    else:
+                        sv = shap_values
+                    
+                    # Ensure we have the right shape
                     if sv.ndim == 3:
-                        sv = sv[0]
-                    shap_arr = sv[0] if sv.ndim == 2 and sv.shape[0] == 1 else sv
-
-                    feature_names = ["N", "P", "K", "rainfall", "temperature", "humidity", "pH"]
-                    df_shap = pd.DataFrame({"feature": feature_names, "shap_value": shap_arr})
-                    df_shap = df_shap.sort_values(by='shap_value', key=lambda x: np.abs(x), ascending=False)
-
-                    chart = alt.Chart(df_shap).mark_bar().encode(
-                        x=alt.X('shap_value:Q', title='SHAP value (impact)'),
-                        y=alt.Y('feature:N', sort='-x', title='Feature'),
-                        tooltip=['feature', 'shap_value']
-                    ).properties(height=250)
-                    st.altair_chart(chart, use_container_width=True)
+                        sv = sv[0, :, 0]  # For classification, take first class
+                    elif sv.ndim == 2:
+                        sv = sv[0]  # Take first sample
+                    
+                    feature_names = ["N", "P", "K", "Temperature", "Humidity", "pH", "Rainfall"]
+                    
+                    # Create SHAP visualization data
+                    shap_data = []
+                    for i, (feature, value) in enumerate(zip(feature_names, sv)):
+                        shap_data.append({
+                            'Feature': feature,
+                            'SHAP_Value': float(value),
+                            'Contribution': 'Positive' if value > 0 else 'Negative',
+                            'Abs_Value': abs(float(value))
+                        })
+                    
+                    df_shap = pd.DataFrame(shap_data).sort_values('Abs_Value', ascending=False)
+                    
+                    # Create SHAP chart
+                    shap_chart = alt.Chart(df_shap).mark_bar().encode(
+                        x=alt.X('SHAP_Value:Q', title='SHAP Value (Feature Impact)'),
+                        y=alt.Y('Feature:N', sort='-x', title='Features'),
+                        color=alt.Color('Contribution:N', 
+                                      scale=alt.Scale(domain=['Positive', 'Negative'], 
+                                                    range=['#2E8B57', '#DC143C'])),
+                        tooltip=['Feature', 'SHAP_Value:Q', 'Contribution']
+                    ).properties(height=300)
+                    
+                    st.altair_chart(shap_chart, use_container_width=True)
+                    
+                    # Show feature impacts
+                    st.write("**Feature Impact Explanation:**")
+                    for _, row in df_shap.head(3).iterrows():
+                        impact = "increases" if row['SHAP_Value'] > 0 else "decreases"
+                        st.write(f"• **{row['Feature']}**: {impact} the recommendation by {abs(row['SHAP_Value']):.3f}")
 
                 except Exception as e:
                     st.error(f"SHAP explanation failed: {e}")
+                    st.info("SHAP explanation requires additional setup. The prediction still works correctly.")
 
             except Exception as e:
                 st.error(f"Error making prediction: {e}")
+                
+                # Show debugging information
+                with st.expander("🔍 Debugging Information"):
+                    st.write(f"Input features shape: {features.shape}")
+                    st.write(f"Model type: {type(yield_model).__name__}")
+                    if hasattr(yield_model, 'classes_'):
+                        st.write(f"Model classes: {yield_model.classes_}")
+                    st.write(f"Error details: {str(e)}")
 
 # -------------------------
 # Footer
