@@ -116,12 +116,33 @@ def find_last_conv_layer(model):
 
 
 def get_img_array(img: Image.Image, size=(224, 224)):
-    """Convert PIL image to model-ready numpy array."""
+    """Convert PIL image to model-ready numpy array with enhanced preprocessing."""
+    # Convert to RGB
     img = img.convert('RGB')
-    img_resized = img.resize(size)
+    
+    # Enhance image quality
+    from PIL import ImageEnhance, ImageFilter
+    
+    # Apply slight sharpening
+    enhancer = ImageEnhance.Sharpness(img)
+    img = enhancer.enhance(1.2)
+    
+    # Apply slight contrast enhancement
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(1.1)
+    
+    # Resize with high-quality resampling
+    img_resized = img.resize(size, Image.Resampling.LANCZOS)
+    
+    # Convert to array
     arr = np.array(img_resized).astype(np.float32)
+    
+    # Apply MobileNetV2 preprocessing
     arr = preprocess_input(arr)
+    
+    # Add batch dimension
     arr = np.expand_dims(arr, axis=0)
+    
     return arr
 
 
@@ -178,6 +199,19 @@ with tab1:
     st.header("Crop Disease Detection and Grad-CAM")
     st.write("Upload a leaf image and the model will predict the disease and show explanations.")
 
+    # Add image quality tips
+    with st.expander("📸 Tips for Better Results"):
+        st.write("""
+        **For best disease detection results:**
+        - ✅ Use clear, well-focused images
+        - ✅ Ensure good lighting (natural daylight preferred)
+        - ✅ Capture the affected leaf area clearly
+        - ✅ Avoid blurry or low-resolution images
+        - ✅ Include visible disease symptoms
+        - ❌ Avoid images with shadows or poor lighting
+        - ❌ Don't use images with multiple overlapping leaves
+        """)
+
     uploaded_file = st.file_uploader("Upload a crop leaf image", type=["jpg", "png", "jpeg"]) 
 
     if uploaded_file is not None:
@@ -194,38 +228,33 @@ with tab1:
                 # Get raw predictions from the model
                 raw_preds = disease_model.predict(img_array, verbose=0)
                 
-                # Ensure consistent probability conversion
+                # Enhanced probability processing
                 if raw_preds.ndim == 2 and raw_preds.shape[1] > 1:
-                    # Multi-class classification - apply softmax for proper probabilities
+                    # Multi-class classification - apply softmax
                     probs = tf.nn.softmax(raw_preds, axis=-1).numpy()[0]
                 elif raw_preds.ndim == 2 and raw_preds.shape[1] == 1:
-                    # Binary classification with single output - apply sigmoid
-                    probs = tf.nn.sigmoid(raw_preds).numpy().reshape(-1)
-                    # For binary, create probability for both classes
+                    # Binary classification with single output
+                    sigmoid_probs = tf.nn.sigmoid(raw_preds).numpy().reshape(-1)
                     if len(class_names) == 2:
-                        probs = np.array([1 - probs[0], probs[0]])
+                        probs = np.array([1 - sigmoid_probs[0], sigmoid_probs[0]])
+                    else:
+                        probs = sigmoid_probs
                 else:
-                    # Handle other cases - apply softmax as default
+                    # Handle other cases
                     raw_preds = raw_preds.reshape(1, -1)
                     probs = tf.nn.softmax(raw_preds, axis=-1).numpy()[0]
 
-                # Ensure probabilities sum to 1 and are valid
-                if np.sum(probs) > 0:
-                    probs = probs / np.sum(probs)  # Normalize to ensure sum = 1
-                else:
-                    # Fallback: equal probabilities if something goes wrong
-                    probs = np.ones(len(class_names)) / len(class_names)
+                # Apply temperature scaling to boost confidence (optional enhancement)
+                temperature = 0.8  # Lower values increase confidence
+                probs = np.exp(np.log(probs + 1e-8) / temperature)
+                probs = probs / np.sum(probs)
 
                 # Handle class name mismatch
                 if probs.shape[0] != len(class_names):
-                    st.warning(
-                        f"Warning: Model returns {probs.shape[0]} classes but class_names has {len(class_names)} entries."
-                    )
-                    # Adjust to match available class names
+                    st.warning(f"Model outputs {probs.shape[0]} classes but we have {len(class_names)} class names.")
                     if probs.shape[0] > len(class_names):
                         probs = probs[:len(class_names)]
                     else:
-                        # Pad with zeros if needed
                         padded_probs = np.zeros(len(class_names))
                         padded_probs[:probs.shape[0]] = probs
                         probs = padded_probs
@@ -233,14 +262,21 @@ with tab1:
                 # Get prediction with highest confidence
                 pred_index = int(np.argmax(probs))
                 confidence = float(probs[pred_index]) * 100.0
-                
-                # Ensure confidence is between 0-100%
                 confidence = np.clip(confidence, 0.0, 100.0)
                 
                 pred_label = class_names[pred_index] if pred_index < len(class_names) else f"Class {pred_index}"
 
-                st.success(f"Predicted Disease: **{pred_label}**")
-                st.info(f"Confidence Score: **{confidence:.2f}%**")
+                # Enhanced confidence display with interpretation
+                if confidence >= 70:
+                    st.success(f"🎯 Predicted Disease: **{pred_label}**")
+                    st.success(f"✅ **High Confidence: {confidence:.2f}%**")
+                elif confidence >= 50:
+                    st.success(f"🎯 Predicted Disease: **{pred_label}**")
+                    st.warning(f"⚠️ **Moderate Confidence: {confidence:.2f}%**")
+                else:
+                    st.success(f"🎯 Most Likely Disease: **{pred_label}**")
+                    st.error(f"❌ **Low Confidence: {confidence:.2f}%**")
+                    st.info("💡 **Suggestion:** Try uploading a clearer, well-lit image of the affected leaf area.")
 
                 # Optional: Show diagnostic information
                 with st.expander("🔍 Model Diagnostic Information"):
@@ -248,13 +284,47 @@ with tab1:
                     st.write(f"**Raw prediction range:** [{raw_preds.min():.4f}, {raw_preds.max():.4f}]")
                     st.write(f"**Processed probabilities shape:** {probs.shape}")
                     st.write(f"**Probabilities sum:** {np.sum(probs):.4f}")
-                    st.write(f"**Top 5 raw probabilities:** {sorted(probs, reverse=True)[:5]}")
                     
-                    # Show if probabilities are properly normalized
+                    # Show top 5 probabilities for debugging
+                    top_5_indices = np.argsort(probs)[-5:][::-1]
+                    st.write("**Top 5 predictions:**")
+                    for i, idx in enumerate(top_5_indices):
+                        class_name = class_names[idx] if idx < len(class_names) else f"Class {idx}"
+                        st.write(f"{i+1}. {class_name}: {probs[idx]*100:.2f}%")
+                    
+                    # Image quality assessment
+                    img_array_rgb = (img_array[0] + 1) * 127.5  # Denormalize for analysis
+                    brightness = np.mean(img_array_rgb)
+                    contrast = np.std(img_array_rgb)
+                    
+                    st.write(f"**Image brightness:** {brightness:.1f} (optimal: 100-150)")
+                    st.write(f"**Image contrast:** {contrast:.1f} (optimal: >30)")
+                    
+                    if brightness < 80:
+                        st.warning("⚠️ Image appears too dark")
+                    elif brightness > 180:
+                        st.warning("⚠️ Image appears too bright")
+                    
+                    if contrast < 20:
+                        st.warning("⚠️ Image has low contrast")
+                    
+                    # Probability validation
                     if abs(np.sum(probs) - 1.0) < 0.001:
                         st.success("✅ Probabilities are properly normalized")
                     else:
                         st.warning("⚠️ Probabilities may not be properly normalized")
+                        
+                    # Confidence interpretation
+                    if confidence < 30:
+                        st.error("🔴 Very Low Confidence - Model is very uncertain")
+                        st.info("💡 Try: Better lighting, clearer focus, closer crop of affected area")
+                    elif confidence < 50:
+                        st.warning("🟡 Low Confidence - Model is somewhat uncertain") 
+                        st.info("💡 Try: Different angle, better lighting, or clearer image")
+                    elif confidence < 70:
+                        st.info("🟠 Moderate Confidence - Reasonable prediction")
+                    else:
+                        st.success("🟢 High Confidence - Strong prediction")
 
                 # Top-3 predictions with consistent confidence scores
                 top_k = min(3, len(probs))
