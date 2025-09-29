@@ -73,22 +73,30 @@ def load_models():
         except Exception as e:
             st.error(f"❌ Error loading disease model: {e}")
 
-    # yield prediction model (joblib pickle)
-    yield_model_path = "yield_model.pkl"
+    # yield prediction model (joblib pickle) - UPDATED TO USE yield2_model.pkl
+    yield_model_path = "yield2_model.pkl"
     if not os.path.exists(yield_model_path):
-        yield_model_url = "https://drive.google.com/uc?id=11kDYJhv-BAUj4sKmUby_QF9xGtu0NRPg"
+        # Updated Google Drive URL for yield2_model.pkl (you'll need to replace this with your actual URL)
+        yield_model_url = ""
         try:
             gdown.download(yield_model_url, yield_model_path, quiet=True)
         except Exception as e:
-            st.error(f"Could not download yield model: {e}")
+            st.error(f"Could not download yield2 model: {e}")
+            st.info("Please upload yield2_model.pkl manually to your Streamlit app directory")
 
     yield_model = None
     if os.path.exists(yield_model_path):
         try:
             yield_model = joblib.load(yield_model_path)
-            st.success("✅ Yield model loaded successfully")
+            st.success("✅ Yield2 model loaded successfully")
         except Exception as e:
-            st.error(f"❌ Error loading yield model: {e}")
+            st.error(f"❌ Error loading yield2 model: {e}")
+            # Fallback: try to load from local directory if uploaded manually
+            try:
+                yield_model = joblib.load("yield2_model.pkl")
+                st.success("✅ Yield2 model loaded from local directory")
+            except Exception as e2:
+                st.error(f"❌ Could not load yield2_model.pkl: {e2}")
 
     return disease_model, yield_model
 
@@ -183,30 +191,79 @@ with tab1:
             if disease_model is None:
                 st.error("Disease model is not loaded.")
             else:
-                raw_preds = disease_model.predict(img_array)
-
+                # Get raw predictions from the model
+                raw_preds = disease_model.predict(img_array, verbose=0)
+                
+                # Ensure consistent probability conversion
                 if raw_preds.ndim == 2 and raw_preds.shape[1] > 1:
+                    # Multi-class classification - apply softmax for proper probabilities
                     probs = tf.nn.softmax(raw_preds, axis=-1).numpy()[0]
-                else:
+                elif raw_preds.ndim == 2 and raw_preds.shape[1] == 1:
+                    # Binary classification with single output - apply sigmoid
                     probs = tf.nn.sigmoid(raw_preds).numpy().reshape(-1)
+                    # For binary, create probability for both classes
+                    if len(class_names) == 2:
+                        probs = np.array([1 - probs[0], probs[0]])
+                else:
+                    # Handle other cases - apply softmax as default
+                    raw_preds = raw_preds.reshape(1, -1)
+                    probs = tf.nn.softmax(raw_preds, axis=-1).numpy()[0]
 
+                # Ensure probabilities sum to 1 and are valid
+                if np.sum(probs) > 0:
+                    probs = probs / np.sum(probs)  # Normalize to ensure sum = 1
+                else:
+                    # Fallback: equal probabilities if something goes wrong
+                    probs = np.ones(len(class_names)) / len(class_names)
+
+                # Handle class name mismatch
                 if probs.shape[0] != len(class_names):
                     st.warning(
-                        f"Warning: model returns {probs.shape[0]} classes but class_names has {len(class_names)} entries."
+                        f"Warning: Model returns {probs.shape[0]} classes but class_names has {len(class_names)} entries."
                     )
+                    # Adjust to match available class names
+                    if probs.shape[0] > len(class_names):
+                        probs = probs[:len(class_names)]
+                    else:
+                        # Pad with zeros if needed
+                        padded_probs = np.zeros(len(class_names))
+                        padded_probs[:probs.shape[0]] = probs
+                        probs = padded_probs
 
+                # Get prediction with highest confidence
                 pred_index = int(np.argmax(probs))
                 confidence = float(probs[pred_index]) * 100.0
+                
+                # Ensure confidence is between 0-100%
+                confidence = np.clip(confidence, 0.0, 100.0)
+                
                 pred_label = class_names[pred_index] if pred_index < len(class_names) else f"Class {pred_index}"
 
                 st.success(f"Predicted Disease: **{pred_label}**")
                 st.info(f"Confidence Score: **{confidence:.2f}%**")
 
-                # Top-3 predictions
-                top_k = min(3, probs.shape[0])
+                # Optional: Show diagnostic information
+                with st.expander("🔍 Model Diagnostic Information"):
+                    st.write(f"**Raw prediction shape:** {raw_preds.shape}")
+                    st.write(f"**Raw prediction range:** [{raw_preds.min():.4f}, {raw_preds.max():.4f}]")
+                    st.write(f"**Processed probabilities shape:** {probs.shape}")
+                    st.write(f"**Probabilities sum:** {np.sum(probs):.4f}")
+                    st.write(f"**Top 5 raw probabilities:** {sorted(probs, reverse=True)[:5]}")
+                    
+                    # Show if probabilities are properly normalized
+                    if abs(np.sum(probs) - 1.0) < 0.001:
+                        st.success("✅ Probabilities are properly normalized")
+                    else:
+                        st.warning("⚠️ Probabilities may not be properly normalized")
+
+                # Top-3 predictions with consistent confidence scores
+                top_k = min(3, len(probs))
                 top_indices = np.argsort(probs)[-top_k:][::-1]
                 top_labels = [class_names[i] if i < len(class_names) else f"Class {i}" for i in top_indices]
-                top_scores = (probs[top_indices] * 100.0).tolist()
+                top_scores = [float(probs[i]) * 100.0 for i in top_indices]
+                
+                # Ensure all scores are between 0-100%
+                top_scores = [np.clip(score, 0.0, 100.0) for score in top_scores]
 
                 st.subheader("Uploaded Leaf & Top Predictions")
                 col1, col2 = st.columns([1, 2])
@@ -261,7 +318,7 @@ with tab2:
         features = np.array([[N, P, K, rainfall, temperature, humidity, pH]])
 
         if yield_model is None:
-            st.error("Yield model is not loaded.")
+            st.error("Yield2 model is not loaded.")
         else:
             try:
                 pred_yield = yield_model.predict(features)
