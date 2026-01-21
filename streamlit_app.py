@@ -1,523 +1,748 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageEnhance
 import cv2
 import os
 import joblib
-import io
+import json
+from datetime import datetime
 
 # TensorFlow and suppress verbose logging
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
-
-# Explanation library
-import shap
 
 # Visualization
 import altair as alt
+import plotly.graph_objects as go
 
 # -------------------------
 # Page config
 # -------------------------
-st.set_page_config(page_title="AgriTech Assistant AI", layout="wide")
+st.set_page_config(
+    page_title="AgriTech CCMT Assistant AI", 
+    layout="wide",
+    page_icon="🌾",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for professional styling
+st.markdown("""
+    <style>
+    .main {
+        padding: 0rem 1rem;
+    }
+    .stAlert {
+        padding: 1rem;
+        border-radius: 0.5rem;
+    }
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1.5rem;
+        border-radius: 1rem;
+        color: white;
+        text-align: center;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .disease-card {
+        background: white;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #4CAF50;
+        margin: 0.5rem 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .confidence-high {
+        color: #2E7D32;
+        font-weight: bold;
+    }
+    .confidence-medium {
+        color: #F57C00;
+        font-weight: bold;
+    }
+    .confidence-low {
+        color: #D32F2F;
+        font-weight: bold;
+    }
+    h1 {
+        color: #1E3A8A;
+        font-weight: 700;
+    }
+    .stTab {
+        font-size: 1.1rem;
+        font-weight: 600;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # -------------------------
-# Class names (modify if your model uses different classes)
+# Load CCMT Class Names
 # -------------------------
-class_names = [
-    'Apple___Apple_scab', 'Apple___Black_rot', 'Apple___Cedar_apple_rust', 'Apple___healthy',
-    'Blueberry___healthy', 'Cherry___healthy', 'Cherry___Powdery_mildew',
-    'Corn___Cercospora_leaf_spot Gray_leaf_spot', 'Corn___Common_rust', 'Corn___healthy',
-    'Corn___Northern_Leaf_Blight', 'Grape___Black_rot', 'Grape___Esca_(Black_Measles)',
-    'Grape___healthy', 'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)',
-    'Orange___Haunglongbing_(Citrus_greening)', 'Peach___Bacterial_spot', 'Peach___healthy',
-    'Pepper,_bell___Bacterial_spot', 'Pepper,_bell___healthy', 'Potato___Early_blight',
-    'Potato___healthy', 'Potato___Late_blight', 'Raspberry___healthy', 'Soybean___healthy',
-    'Squash___Powdery_mildew', 'Strawberry___healthy', 'Strawberry___Leaf_scorch',
-    'Tomato___Bacterial_spot', 'Tomato___Early_blight', 'Tomato___healthy',
-    'Tomato___Late_blight', 'Tomato___Leaf_Mold', 'Tomato___Septoria_leaf_spot',
-    'Tomato___Spider_mites Two-spotted_spider_mite', 'Tomato___Target_Spot',
-    'Tomato___Tomato_mosaic_virus', 'Tomato___Tomato_Yellow_Leaf_Curl_Virus'
-]
+@st.cache_data
+def load_ccmt_class_names():
+    """Load class names from the trained CCMT model"""
+    class_indices_path = "class_indices.json"
+    
+    if os.path.exists(class_indices_path):
+        with open(class_indices_path, 'r') as f:
+            class_indices = json.load(f)
+        # Reverse to get idx->name mapping
+        idx_to_class = {v: k for k, v in class_indices.items()}
+        return idx_to_class
+    else:
+        # Fallback: Default CCMT classes
+        st.warning("class_indices.json not found. Using default CCMT classes.")
+        return {
+            0: 'Cashew_anthracnose', 1: 'Cashew_gumosis', 2: 'Cashew_healthy',
+            3: 'Cashew_leaf miner', 4: 'Cashew_red rust',
+            5: 'Cassava_bacterial blight', 6: 'Cassava_brown spot',
+            7: 'Cassava_green mite', 8: 'Cassava_healthy', 9: 'Cassava_mosaic',
+            10: 'Maize_fall armyworm', 11: 'Maize_grasshopper', 12: 'Maize_healthy',
+            13: 'Maize_leaf beetle', 14: 'Maize_leaf blight',
+            15: 'Maize_leaf spot', 16: 'Maize_streak virus',
+            17: 'Tomato_healthy', 18: 'Tomato_leaf blight', 19: 'Tomato_leaf curl',
+            20: 'Tomato_septoria leaf spot', 21: 'Tomato_verticillium wilt'
+        }
 
 # -------------------------
-# Utilities
+# Disease Information Database
+# -------------------------
+DISEASE_INFO = {
+    'healthy': {
+        'severity': 'None',
+        'treatment': 'No treatment needed. Continue good agricultural practices.',
+        'prevention': 'Maintain proper spacing, irrigation, and nutrient management.',
+        'color': '#4CAF50'
+    },
+    'anthracnose': {
+        'severity': 'High',
+        'treatment': 'Apply copper-based fungicides. Remove infected plant parts.',
+        'prevention': 'Use resistant varieties. Ensure proper drainage and air circulation.',
+        'color': '#F44336'
+    },
+    'bacterial blight': {
+        'severity': 'High',
+        'treatment': 'Apply copper-based bactericides. Remove and destroy infected plants.',
+        'prevention': 'Use disease-free planting material. Practice crop rotation.',
+        'color': '#F44336'
+    },
+    'mosaic': {
+        'severity': 'High',
+        'treatment': 'No cure available. Remove infected plants to prevent spread.',
+        'prevention': 'Control whitefly populations. Use virus-resistant varieties.',
+        'color': '#F44336'
+    },
+    'leaf spot': {
+        'severity': 'Medium',
+        'treatment': 'Apply appropriate fungicides. Remove affected leaves.',
+        'prevention': 'Avoid overhead irrigation. Ensure good air circulation.',
+        'color': '#FF9800'
+    },
+    'rust': {
+        'severity': 'Medium',
+        'treatment': 'Apply fungicides containing sulfur or copper.',
+        'prevention': 'Remove plant debris. Use resistant varieties.',
+        'color': '#FF9800'
+    },
+    'blight': {
+        'severity': 'High',
+        'treatment': 'Apply systemic fungicides immediately. Improve drainage.',
+        'prevention': 'Use certified disease-free seeds. Practice crop rotation.',
+        'color': '#F44336'
+    }
+}
+
+def get_disease_info(disease_name):
+    """Extract disease information based on disease name"""
+    disease_lower = disease_name.lower()
+    
+    if 'healthy' in disease_lower:
+        return DISEASE_INFO['healthy']
+    elif 'anthracnose' in disease_lower:
+        return DISEASE_INFO['anthracnose']
+    elif 'bacterial' in disease_lower or 'blight' in disease_lower:
+        return DISEASE_INFO['bacterial blight']
+    elif 'mosaic' in disease_lower:
+        return DISEASE_INFO['mosaic']
+    elif 'spot' in disease_lower:
+        return DISEASE_INFO['leaf spot']
+    elif 'rust' in disease_lower:
+        return DISEASE_INFO['rust']
+    else:
+        return {
+            'severity': 'Unknown',
+            'treatment': 'Consult agricultural extension services for specific treatment.',
+            'prevention': 'Practice good agricultural hygiene and monitoring.',
+            'color': '#9E9E9E'
+        }
+
+# -------------------------
+# Model Loading
 # -------------------------
 @st.cache_resource
-def load_models():
-    """Load or download the disease detection and yield models."""
-    try:
-        import gdown
-    except Exception:
-        st.info("Installing gdown (needed to download models if not present)...")
-        os.system("pip install gdown --quiet")
-        import gdown
-
-    # disease model (MobileNetV2-based expected)
-    disease_model_path = "plant_disease_model_mobilenetv2.h5"
-    if not os.path.exists(disease_model_path):
-        disease_model_url = "https://drive.google.com/uc?id=1fBVg3K3Tiu_TPb7JnT8gAonic4yHqhte"
-        try:
-            gdown.download(disease_model_url, disease_model_path, quiet=True)
-        except Exception as e:
-            st.error(f"Could not download disease model: {e}")
-
-    disease_model = None
-    if os.path.exists(disease_model_path):
-        try:
-            # FIX: use compile=False to avoid 'batch_shape' error
-            disease_model = tf.keras.models.load_model(disease_model_path, compile=False)
-            st.success("✅ Disease model loaded successfully")
-        except Exception as e:
-            st.error(f"❌ Error loading disease model: {e}")
-
-    # yield prediction model (joblib pickle) - UPDATED TO USE yield2_model.pkl
-    yield_model_path = "yield2_model.pkl"
-    if not os.path.exists(yield_model_path):
-        # Updated Google Drive URL for yield2_model.pkl (you'll need to replace this with your actual URL)
-        yield_model_url = "https://drive.google.com/uc?id=YOUR_YIELD2_MODEL_DRIVE_ID_HERE"
-        try:
-            gdown.download(yield_model_url, yield_model_path, quiet=True)
-        except Exception as e:
-            st.error(f"Could not download yield2 model: {e}")
-            st.info("Please upload yield2_model.pkl manually to your Streamlit app directory")
-
-    yield_model = None
-    if os.path.exists(yield_model_path):
-        try:
-            yield_model = joblib.load(yield_model_path)
-            st.success("✅ Yield2 model loaded successfully")
-        except Exception as e:
-            st.error(f"❌ Error loading yield2 model: {e}")
-            # Fallback: try to load from local directory if uploaded manually
-            try:
-                yield_model = joblib.load("yield2_model.pkl")
-                st.success("✅ Yield2 model loaded from local directory")
-            except Exception as e2:
-                st.error(f"❌ Could not load yield2_model.pkl: {e2}")
-
-    return disease_model, yield_model
-
-
-def find_last_conv_layer(model):
-    """Try to find the last convolutional layer in a Keras model."""
-    try:
-        for layer in reversed(model.layers):
-            if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D, tf.keras.layers.Conv1D)):
-                return layer.name
-        for layer in reversed(model.layers):
-            if 'conv' in layer.name.lower():
-                return layer.name
-    except Exception:
+def load_disease_model():
+    """Load the trained CCMT MobileNetV2 model"""
+    model_path = "ccmt_crop_disease_model.keras"
+    
+    if not os.path.exists(model_path):
+        st.error(f"❌ Model file not found: {model_path}")
+        st.info("Please ensure 'ccmt_crop_disease_model.keras' is in the app directory")
         return None
-    return None
+    
+    try:
+        model = tf.keras.models.load_model(model_path, compile=False)
+        
+        # Recompile with appropriate metrics
+        model.compile(
+            optimizer='adam',
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
+        
+        st.success("✅ CCMT Disease Detection Model loaded successfully")
+        return model
+    except Exception as e:
+        st.error(f"❌ Error loading model: {e}")
+        return None
 
+@st.cache_resource
+def load_yield_model():
+    """Load the yield prediction model"""
+    yield_model_path = "yield2_model.pkl"
+    
+    if not os.path.exists(yield_model_path):
+        st.warning("⚠️ Yield prediction model not found")
+        return None
+    
+    try:
+        yield_model = joblib.load(yield_model_path)
+        st.success("✅ Yield Prediction Model loaded successfully")
+        return yield_model
+    except Exception as e:
+        st.error(f"❌ Error loading yield model: {e}")
+        return None
 
-def get_img_array(img: Image.Image, size=(224, 224)):
-    """Convert PIL image to model-ready numpy array with enhanced preprocessing."""
+# -------------------------
+# Image Processing
+# -------------------------
+def enhance_image(img: Image.Image):
+    """Enhanced image preprocessing for better accuracy"""
     # Convert to RGB
     img = img.convert('RGB')
     
-    # Enhance image quality
-    from PIL import ImageEnhance, ImageFilter
-    
-    # Apply slight sharpening
+    # Apply enhancements
     enhancer = ImageEnhance.Sharpness(img)
+    img = enhancer.enhance(1.3)
+    
+    enhancer = ImageEnhance.Contrast(img)
     img = enhancer.enhance(1.2)
     
-    # Apply slight contrast enhancement
-    enhancer = ImageEnhance.Contrast(img)
+    enhancer = ImageEnhance.Color(img)
     img = enhancer.enhance(1.1)
     
-    # Resize with high-quality resampling
+    return img
+
+def preprocess_image(img: Image.Image, size=(224, 224)):
+    """Preprocess image for CCMT model"""
+    # Enhance image
+    img = enhance_image(img)
+    
+    # Resize with high quality
     img_resized = img.resize(size, Image.Resampling.LANCZOS)
     
-    # Convert to array
-    arr = np.array(img_resized).astype(np.float32)
-    
-    # Apply MobileNetV2 preprocessing
-    arr = preprocess_input(arr)
+    # Convert to array and normalize
+    img_array = np.array(img_resized).astype(np.float32)
+    img_array = img_array / 255.0  # Normalize to [0, 1]
     
     # Add batch dimension
-    arr = np.expand_dims(arr, axis=0)
+    img_array = np.expand_dims(img_array, axis=0)
     
-    return arr
+    return img_array, img_resized
 
+def assess_image_quality(img: Image.Image):
+    """Assess uploaded image quality"""
+    img_array = np.array(img.convert('RGB'))
+    
+    # Calculate metrics
+    brightness = np.mean(img_array)
+    contrast = np.std(img_array)
+    sharpness = cv2.Laplacian(cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY), cv2.CV_64F).var()
+    
+    quality_score = 0
+    issues = []
+    
+    # Brightness check
+    if 80 <= brightness <= 180:
+        quality_score += 33
+    else:
+        if brightness < 80:
+            issues.append("Image is too dark")
+        else:
+            issues.append("Image is too bright")
+    
+    # Contrast check
+    if contrast > 25:
+        quality_score += 33
+    else:
+        issues.append("Image has low contrast")
+    
+    # Sharpness check
+    if sharpness > 100:
+        quality_score += 34
+    else:
+        issues.append("Image appears blurry")
+    
+    return quality_score, issues, {
+        'brightness': brightness,
+        'contrast': contrast,
+        'sharpness': sharpness
+    }
 
+# -------------------------
+# Grad-CAM Visualization
+# -------------------------
 def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
-    """Compute Grad-CAM heatmap for a prediction."""
-    grad_model = tf.keras.models.Model(
-        [model.inputs], [model.get_layer(last_conv_layer_name).output, model.output]
-    )
-    with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model(img_array)
-        if pred_index is None:
-            pred_index = tf.argmax(predictions[0])
-        class_channel = predictions[:, pred_index]
+    """Generate Grad-CAM heatmap"""
+    try:
+        grad_model = tf.keras.models.Model(
+            [model.inputs],
+            [model.get_layer(last_conv_layer_name).output, model.output]
+        )
+        
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model(img_array)
+            if pred_index is None:
+                pred_index = tf.argmax(predictions[0])
+            class_channel = predictions[:, pred_index]
+        
+        grads = tape.gradient(class_channel, conv_outputs)
+        
+        if grads is None:
+            return None
+        
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        conv_outputs = conv_outputs[0]
+        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+        heatmap = tf.squeeze(heatmap)
+        
+        heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+        return heatmap.numpy()
+    
+    except Exception as e:
+        st.warning(f"Grad-CAM generation failed: {e}")
+        return None
 
-    grads = tape.gradient(class_channel, conv_outputs)
-    if grads is None:
-        raise RuntimeError("Could not compute gradients for Grad-CAM.")
+def overlay_heatmap(original_img, heatmap, alpha=0.4):
+    """Overlay heatmap on original image"""
+    # Resize heatmap to original image size
+    heatmap = cv2.resize(heatmap, (original_img.width, original_img.height))
+    heatmap = np.uint8(255 * heatmap)
+    
+    # Apply colormap
+    heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+    
+    # Overlay on original
+    original_array = np.array(original_img)
+    superimposed = cv2.addWeighted(original_array, 1-alpha, heatmap_colored, alpha, 0)
+    
+    return Image.fromarray(superimposed)
 
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-    conv_outputs = conv_outputs[0]
-    heatmap = tf.tensordot(conv_outputs, pooled_grads, axes=[-1, 0])
-    heatmap = tf.maximum(heatmap, 0)
-    denom = tf.math.reduce_max(heatmap) + tf.keras.backend.epsilon()
-    heatmap = heatmap / denom
-    heatmap = tf.image.resize(heatmap[..., tf.newaxis], (img_array.shape[1], img_array.shape[2]))
-    heatmap = tf.squeeze(heatmap).numpy()
-    return heatmap
-
-
-def overlay_heatmap(pil_img: Image.Image, heatmap, alpha=0.4, colormap=cv2.COLORMAP_JET):
-    """Overlay heatmap onto original PIL image and return RGB uint8 numpy array."""
-    heatmap_uint8 = np.uint8(255 * heatmap)
-    heatmap_color = cv2.applyColorMap(heatmap_uint8, colormap)
-    heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-    original = np.array(pil_img.convert('RGB'))
-    heatmap_color = cv2.resize(heatmap_color, (original.shape[1], original.shape[0]))
-    overlay = cv2.addWeighted(original, 1 - alpha, heatmap_color, alpha, 0)
-    return overlay
-
+def find_last_conv_layer(model):
+    """Find the last convolutional layer in the model"""
+    for layer in reversed(model.layers):
+        if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
+            return layer.name
+    return None
 
 # -------------------------
-# Load models at app start
+# Main App
 # -------------------------
-with st.spinner('Loading models...'):
-    disease_model, yield_model = load_models()
-
-# -------------------------
-# App layout (tabs)
-# -------------------------
-tab1, tab2 = st.tabs(["Disease Detection & Grad-CAM", "Yield Prediction & SHAP"])
-
-# -------- Tab 1: Disease Detection & Grad-CAM --------
-with tab1:
-    st.header("Crop Disease Detection and Grad-CAM")
-    st.write("Upload a leaf image and the model will predict the disease and show explanations.")
-
-    # Add image quality tips
-    with st.expander("📸 Tips for Better Results"):
-        st.write("""
-        **For best disease detection results:**
-        - ✅ Use clear, well-focused images
-        - ✅ Ensure good lighting (natural daylight preferred)
-        - ✅ Capture the affected leaf area clearly
-        - ✅ Avoid blurry or low-resolution images
-        - ✅ Include visible disease symptoms
-        - ❌ Avoid images with shadows or poor lighting
-        - ❌ Don't use images with multiple overlapping leaves
+def main():
+    # Sidebar
+    with st.sidebar:
+        st.image("https://img.icons8.com/color/96/000000/farm.png", width=80)
+        st.title("🌾 AgriTech CCMT")
+        st.markdown("### AI-Powered Crop Management")
+        st.markdown("---")
+        
+        st.markdown("""
+        **Supported Crops:**
+        - 🥜 Cashew
+        - 🌿 Cassava  
+        - 🌽 Maize
+        - 🍅 Tomato
+        
+        **Features:**
+        - Disease Detection (22 classes)
+        - AI Confidence Scoring
+        - Visual Explanations (Grad-CAM)
+        - Treatment Recommendations
+        - Yield Prediction
         """)
-
-    uploaded_file = st.file_uploader("Upload a crop leaf image", type=["jpg", "png", "jpeg"]) 
-
-    if uploaded_file is not None:
-        try:
-            image = Image.open(uploaded_file).convert('RGB')
-            st.image(image, caption="Uploaded Image (preview)", use_column_width=True)
-
-            img_size = (224, 224)
-            img_array = get_img_array(image, size=img_size)
-
-            if disease_model is None:
-                st.error("Disease model is not loaded.")
-            else:
-                # Get raw predictions from the model
-                raw_preds = disease_model.predict(img_array, verbose=0)
+        
+        st.markdown("---")
+        st.caption("Powered by MobileNetV2 & TensorFlow")
+    
+    # Header
+    st.title("🌾 AgriTech CCMT Assistant AI")
+    st.markdown("### Professional Crop Disease Detection & Management System")
+    st.markdown("---")
+    
+    # Load models
+    with st.spinner('🔄 Loading AI models...'):
+        disease_model = load_disease_model()
+        yield_model = load_yield_model()
+        class_names = load_ccmt_class_names()
+    
+    # Create tabs
+    tab1, tab2, tab3 = st.tabs([
+        "🔬 Disease Detection", 
+        "📊 Yield Prediction",
+        "📖 User Guide"
+    ])
+    
+    # ========== TAB 1: DISEASE DETECTION ==========
+    with tab1:
+        st.header("🔬 Crop Disease Detection")
+        st.markdown("Upload a clear image of the affected crop leaf for AI-powered disease detection")
+        
+        # Image quality tips
+        with st.expander("📸 **Tips for Best Results**", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("""
+                **✅ DO:**
+                - Use natural daylight
+                - Capture affected leaf clearly
+                - Ensure image is in focus
+                - Fill frame with leaf
+                - Use high resolution (min 800x800px)
+                """)
+            with col2:
+                st.markdown("""
+                **❌ DON'T:**
+                - Use images with shadows
+                - Include multiple overlapping leaves
+                - Upload blurry photos
+                - Use very small images
+                - Capture in low light
+                """)
+        
+        # File uploader
+        uploaded_file = st.file_uploader(
+            "Upload Crop Leaf Image",
+            type=["jpg", "jpeg", "png"],
+            help="Supported formats: JPG, JPEG, PNG"
+        )
+        
+        if uploaded_file is not None:
+            try:
+                # Load image
+                original_image = Image.open(uploaded_file).convert('RGB')
                 
-                # Enhanced probability processing
-                if raw_preds.ndim == 2 and raw_preds.shape[1] > 1:
-                    # Multi-class classification - apply softmax
-                    probs = tf.nn.softmax(raw_preds, axis=-1).numpy()[0]
-                elif raw_preds.ndim == 2 and raw_preds.shape[1] == 1:
-                    # Binary classification with single output
-                    sigmoid_probs = tf.nn.sigmoid(raw_preds).numpy().reshape(-1)
-                    if len(class_names) == 2:
-                        probs = np.array([1 - sigmoid_probs[0], sigmoid_probs[0]])
-                    else:
-                        probs = sigmoid_probs
-                else:
-                    # Handle other cases
-                    raw_preds = raw_preds.reshape(1, -1)
-                    probs = tf.nn.softmax(raw_preds, axis=-1).numpy()[0]
-
-                # Apply temperature scaling to boost confidence (optional enhancement)
-                temperature = 0.8  # Lower values increase confidence
-                probs = np.exp(np.log(probs + 1e-8) / temperature)
-                probs = probs / np.sum(probs)
-
-                # Handle class name mismatch
-                if probs.shape[0] != len(class_names):
-                    st.warning(f"Model outputs {probs.shape[0]} classes but we have {len(class_names)} class names.")
-                    if probs.shape[0] > len(class_names):
-                        probs = probs[:len(class_names)]
-                    else:
-                        padded_probs = np.zeros(len(class_names))
-                        padded_probs[:probs.shape[0]] = probs
-                        probs = padded_probs
-
-                # Get prediction with highest confidence
-                pred_index = int(np.argmax(probs))
-                confidence = float(probs[pred_index]) * 100.0
-                confidence = np.clip(confidence, 0.0, 100.0)
+                # Display original image
+                col1, col2 = st.columns([1, 1])
                 
-                pred_label = class_names[pred_index] if pred_index < len(class_names) else f"Class {pred_index}"
-
-                # Enhanced confidence display with interpretation
-                if confidence >= 70:
-                    st.success(f"🎯 Predicted Disease: **{pred_label}**")
-                    st.success(f"✅ **High Confidence: {confidence:.2f}%**")
-                elif confidence >= 50:
-                    st.success(f"🎯 Predicted Disease: **{pred_label}**")
-                    st.warning(f"⚠️ **Moderate Confidence: {confidence:.2f}%**")
-                else:
-                    st.success(f"🎯 Most Likely Disease: **{pred_label}**")
-                    st.error(f"❌ **Low Confidence: {confidence:.2f}%**")
-                    st.info("💡 **Suggestion:** Try uploading a clearer, well-lit image of the affected leaf area.")
-
-                # Optional: Show diagnostic information
-                with st.expander("🔍 Model Diagnostic Information"):
-                    st.write(f"**Raw prediction shape:** {raw_preds.shape}")
-                    st.write(f"**Raw prediction range:** [{raw_preds.min():.4f}, {raw_preds.max():.4f}]")
-                    st.write(f"**Processed probabilities shape:** {probs.shape}")
-                    st.write(f"**Probabilities sum:** {np.sum(probs):.4f}")
-                    
-                    # Show top 5 probabilities for debugging
-                    top_5_indices = np.argsort(probs)[-5:][::-1]
-                    st.write("**Top 5 predictions:**")
-                    for i, idx in enumerate(top_5_indices):
-                        class_name = class_names[idx] if idx < len(class_names) else f"Class {idx}"
-                        st.write(f"{i+1}. {class_name}: {probs[idx]*100:.2f}%")
+                with col1:
+                    st.subheader("📷 Uploaded Image")
+                    st.image(original_image, use_column_width=True)
                     
                     # Image quality assessment
-                    img_array_rgb = (img_array[0] + 1) * 127.5  # Denormalize for analysis
-                    brightness = np.mean(img_array_rgb)
-                    contrast = np.std(img_array_rgb)
+                    quality_score, issues, metrics = assess_image_quality(original_image)
                     
-                    st.write(f"**Image brightness:** {brightness:.1f} (optimal: 100-150)")
-                    st.write(f"**Image contrast:** {contrast:.1f} (optimal: >30)")
+                    st.markdown("#### Image Quality Assessment")
                     
-                    if brightness < 80:
-                        st.warning("⚠️ Image appears too dark")
-                    elif brightness > 180:
-                        st.warning("⚠️ Image appears too bright")
-                    
-                    if contrast < 20:
-                        st.warning("⚠️ Image has low contrast")
-                    
-                    # Probability validation
-                    if abs(np.sum(probs) - 1.0) < 0.001:
-                        st.success("✅ Probabilities are properly normalized")
+                    # Quality score with color
+                    if quality_score >= 80:
+                        st.success(f"✅ Quality Score: {quality_score}/100 (Excellent)")
+                    elif quality_score >= 60:
+                        st.warning(f"⚠️ Quality Score: {quality_score}/100 (Good)")
                     else:
-                        st.warning("⚠️ Probabilities may not be properly normalized")
-                        
-                    # Confidence interpretation
-                    if confidence < 30:
-                        st.error("🔴 Very Low Confidence - Model is very uncertain")
-                        st.info("💡 Try: Better lighting, clearer focus, closer crop of affected area")
-                    elif confidence < 50:
-                        st.warning("🟡 Low Confidence - Model is somewhat uncertain") 
-                        st.info("💡 Try: Different angle, better lighting, or clearer image")
-                    elif confidence < 70:
-                        st.info("🟠 Moderate Confidence - Reasonable prediction")
-                    else:
-                        st.success("🟢 High Confidence - Strong prediction")
-
-                # Top-3 predictions with consistent confidence scores
-                top_k = min(3, len(probs))
-                top_indices = np.argsort(probs)[-top_k:][::-1]
-                top_labels = [class_names[i] if i < len(class_names) else f"Class {i}" for i in top_indices]
-                top_scores = [float(probs[i]) * 100.0 for i in top_indices]
+                        st.error(f"❌ Quality Score: {quality_score}/100 (Poor)")
+                    
+                    if issues:
+                        st.warning("**Issues detected:**")
+                        for issue in issues:
+                            st.write(f"• {issue}")
                 
-                # Ensure all scores are between 0-100%
-                top_scores = [np.clip(score, 0.0, 100.0) for score in top_scores]
-
-                st.subheader("Uploaded Leaf & Top Predictions")
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.image(image, caption="Uploaded Leaf", use_column_width=True)
-
                 with col2:
-                    df_top = pd.DataFrame({"label": top_labels, "confidence": top_scores})
-                    chart = alt.Chart(df_top).mark_bar().encode(
-                        x=alt.X('confidence:Q', title='Confidence (%)'),
-                        y=alt.Y('label:N', sort='-x', title='Prediction'),
-                        tooltip=['label', 'confidence']
-                    ).properties(height=200)
-                    st.altair_chart(chart, use_container_width=True)
-
-                # Grad-CAM
-                st.subheader("Grad-CAM Explanation")
+                    if disease_model is None:
+                        st.error("❌ Disease detection model not loaded")
+                    else:
+                        with st.spinner('🔄 Analyzing image...'):
+                            # Preprocess
+                            img_array, img_resized = preprocess_image(original_image)
+                            
+                            # Predict
+                            predictions = disease_model.predict(img_array, verbose=0)
+                            probs = predictions[0]
+                            
+                            # Get top prediction
+                            pred_idx = int(np.argmax(probs))
+                            confidence = float(probs[pred_idx]) * 100
+                            pred_label = class_names.get(pred_idx, f"Class_{pred_idx}")
+                            
+                            # Extract crop and disease
+                            if '_' in pred_label:
+                                crop, disease = pred_label.split('_', 1)
+                            else:
+                                crop, disease = "Unknown", pred_label
+                            
+                            # Display results
+                            st.subheader("🎯 Detection Results")
+                            
+                            # Confidence-based display
+                            if confidence >= 70:
+                                st.success(f"### ✅ {disease.replace('_', ' ').title()}")
+                                conf_class = "confidence-high"
+                                conf_emoji = "🟢"
+                            elif confidence >= 50:
+                                st.warning(f"### ⚠️ {disease.replace('_', ' ').title()}")
+                                conf_class = "confidence-medium"
+                                conf_emoji = "🟡"
+                            else:
+                                st.error(f"### ❌ {disease.replace('_', ' ').title()}")
+                                conf_class = "confidence-low"
+                                conf_emoji = "🔴"
+                            
+                            # Confidence display
+                            st.markdown(f"""
+                            <div style='background: #f0f2f6; padding: 1rem; border-radius: 0.5rem; margin: 1rem 0;'>
+                                <p style='margin:0; font-size: 0.9rem; color: #666;'>Confidence Level</p>
+                                <p style='margin:0; font-size: 2rem; font-weight: bold;' class='{conf_class}'>
+                                    {conf_emoji} {confidence:.1f}%
+                                </p>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            st.markdown(f"**🌾 Crop:** {crop.title()}")
+                            st.markdown(f"**🦠 Disease:** {disease.replace('_', ' ').title()}")
+                            
+                            # Get disease information
+                            disease_info = get_disease_info(disease)
+                            
+                            st.markdown(f"""
+                            <div style='background: {disease_info['color']}22; padding: 0.8rem; border-radius: 0.5rem; border-left: 4px solid {disease_info['color']}; margin: 1rem 0;'>
+                                <strong>Severity:</strong> {disease_info['severity']}
+                            </div>
+                            """, unsafe_allow_html=True)
+                
+                # Treatment recommendations
+                st.markdown("---")
+                st.subheader("💊 Treatment & Prevention")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("#### 🩺 Recommended Treatment")
+                    st.info(disease_info['treatment'])
+                
+                with col2:
+                    st.markdown("#### 🛡️ Prevention Measures")
+                    st.info(disease_info['prevention'])
+                
+                # Top 5 predictions
+                st.markdown("---")
+                st.subheader("📊 Detailed Analysis")
+                
+                top_k = min(5, len(probs))
+                top_indices = np.argsort(probs)[-top_k:][::-1]
+                
+                # Create dataframe
+                top_predictions = []
+                for idx in top_indices:
+                    label = class_names.get(idx, f"Class_{idx}")
+                    prob = float(probs[idx]) * 100
+                    top_predictions.append({
+                        'Rank': len(top_predictions) + 1,
+                        'Disease': label.replace('_', ' ').title(),
+                        'Confidence': f"{prob:.2f}%",
+                        'Probability': prob
+                    })
+                
+                df_top = pd.DataFrame(top_predictions)
+                
+                # Plotly chart
+                fig = go.Figure(data=[
+                    go.Bar(
+                        y=df_top['Disease'],
+                        x=df_top['Probability'],
+                        orientation='h',
+                        marker=dict(
+                            color=df_top['Probability'],
+                            colorscale='RdYlGn',
+                            showscale=True,
+                            colorbar=dict(title="Confidence %")
+                        ),
+                        text=df_top['Confidence'],
+                        textposition='auto',
+                    )
+                ])
+                
+                fig.update_layout(
+                    title="Top 5 Disease Predictions",
+                    xaxis_title="Confidence (%)",
+                    yaxis_title="Disease",
+                    height=400,
+                    yaxis={'categoryorder': 'total ascending'}
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Grad-CAM visualization
+                st.markdown("---")
+                st.subheader("🔍 AI Visual Explanation (Grad-CAM)")
+                st.markdown("Highlighted regions show where the AI focused to make its decision")
+                
                 last_conv = find_last_conv_layer(disease_model)
-                if last_conv is None:
-                    st.error("Could not find a convolutional layer for Grad-CAM.")
-                else:
-                    try:
-                        heatmap = make_gradcam_heatmap(img_array, disease_model, last_conv, pred_index)
-                        heatmap_overlay = overlay_heatmap(image, heatmap, alpha=0.5)
-                        st.image(heatmap_overlay, caption=f"Grad-CAM Overlay (layer: {last_conv})", use_column_width=True)
-                    except Exception as e:
-                        st.error(f"Could not generate Grad-CAM: {e}")
-
-        except Exception as e:
-            st.error(f"Error processing image: {e}")
-
-# -------- Tab 2: Crop Recommendation & SHAP --------
-with tab2:
-    st.header("Crop Recommendation and Explanation")
-    st.write("Enter soil and climate conditions to get crop recommendations with explanations.")
-
-    st.subheader("Input Features")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        N = st.number_input("Nitrogen (N)", value=90.0, min_value=0.0, max_value=200.0)
-        P = st.number_input("Phosphorus (P)", value=42.0, min_value=0.0, max_value=150.0)
-    with c2:
-        K = st.number_input("Potassium (K)", value=43.0, min_value=0.0, max_value=200.0)
-        temperature = st.number_input("Average Temperature (°C)", value=20.9, min_value=0.0, max_value=50.0)
-        humidity = st.number_input("Average Humidity (%)", value=82.0, min_value=0.0, max_value=100.0)
-    with c3:
-        pH = st.number_input("Soil pH", value=6.5, min_value=0.0, max_value=14.0, step=0.1)
-        rainfall = st.number_input("Annual Rainfall (mm)", value=202.9, min_value=0.0, max_value=500.0)
-
-    if st.button("Get Crop Recommendation"):
-        features = np.array([[N, P, K, temperature, humidity, pH, rainfall]])
-
-        if yield_model is None:
-            st.error("Crop recommendation model is not loaded.")
-        else:
-            try:
-                # Check if it's a classification model
-                if hasattr(yield_model, 'predict_proba'):
-                    # Classification model - get crop recommendations
-                    prediction = yield_model.predict(features)
-                    probabilities = yield_model.predict_proba(features)
-                    
-                    # Get the predicted crop
-                    predicted_crop = prediction[0] if hasattr(prediction, '__len__') else prediction
-                    
-                    # Get all class probabilities
-                    if hasattr(yield_model, 'classes_'):
-                        classes = yield_model.classes_
-                        probs = probabilities[0] if probabilities.ndim > 1 else probabilities
-                        
-                        st.success(f"Recommended Crop: **{predicted_crop}**")
-                        
-                        # Show confidence
-                        max_prob_idx = np.argmax(probs)
-                        confidence = probs[max_prob_idx] * 100
-                        st.info(f"Confidence: **{confidence:.2f}%**")
-                        
-                        # Show top 3 recommendations
-                        st.subheader("Top 3 Crop Recommendations")
-                        top_3_idx = np.argsort(probs)[-3:][::-1]
-                        
-                        recommendations_data = []
-                        for idx in top_3_idx:
-                            recommendations_data.append({
-                                'Crop': classes[idx],
-                                'Suitability': f"{probs[idx] * 100:.2f}%"
-                            })
-                        
-                        df_recommendations = pd.DataFrame(recommendations_data)
-                        
-                        # Create visualization
-                        chart = alt.Chart(df_recommendations).mark_bar().encode(
-                            x=alt.X('Suitability:Q', title='Suitability (%)'),
-                            y=alt.Y('Crop:N', sort='-x', title='Recommended Crops'),
-                            color=alt.Color('Suitability:Q', scale=alt.Scale(scheme='greens')),
-                            tooltip=['Crop', 'Suitability']
-                        ).properties(height=200)
-                        
-                        st.altair_chart(chart, use_container_width=True)
-                        st.dataframe(df_recommendations, hide_index=True)
-                        
-                    else:
-                        st.success(f"Recommended Crop: **{predicted_crop}**")
                 
+                if last_conv:
+                    with st.spinner('Generating visual explanation...'):
+                        heatmap = make_gradcam_heatmap(img_array, disease_model, last_conv, pred_idx)
+                        
+                        if heatmap is not None:
+                            overlay_img = overlay_heatmap(original_image, heatmap, alpha=0.5)
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.image(original_image, caption="Original Image", use_column_width=True)
+                            with col2:
+                                st.image(overlay_img, caption="Grad-CAM Overlay (Focus Areas in Red)", use_column_width=True)
+                        else:
+                            st.warning("Could not generate Grad-CAM visualization")
                 else:
-                    # Regression model - treat as yield prediction
-                    prediction = yield_model.predict(features)
-                    pred_val = float(prediction[0]) if hasattr(prediction, '__len__') else float(prediction)
-                    st.success(f"Predicted Yield: **{pred_val:.2f} tons/hectare**")
-
-                # SHAP explanation
-                st.subheader("SHAP Feature Importance")
-                try:
-                    # Create background dataset for SHAP
-                    background_data = np.array([[
-                        [50, 30, 30, 25, 70, 6.5, 150],  # Sample 1
-                        [100, 50, 50, 20, 80, 7.0, 200],  # Sample 2
-                        [80, 40, 40, 22, 75, 6.8, 180]   # Sample 3
-                    ]])
-                    
-                    explainer = shap.Explainer(yield_model, background_data.reshape(3, -1))
-                    shap_values = explainer(features)
-                    
-                    # Handle different SHAP value formats
-                    if hasattr(shap_values, 'values'):
-                        sv = shap_values.values
-                    else:
-                        sv = shap_values
-                    
-                    # Ensure we have the right shape
-                    if sv.ndim == 3:
-                        sv = sv[0, :, 0]  # For classification, take first class
-                    elif sv.ndim == 2:
-                        sv = sv[0]  # Take first sample
-                    
-                    feature_names = ["N", "P", "K", "Temperature", "Humidity", "pH", "Rainfall"]
-                    
-                    # Create SHAP visualization data
-                    shap_data = []
-                    for i, (feature, value) in enumerate(zip(feature_names, sv)):
-                        shap_data.append({
-                            'Feature': feature,
-                            'SHAP_Value': float(value),
-                            'Contribution': 'Positive' if value > 0 else 'Negative',
-                            'Abs_Value': abs(float(value))
-                        })
-                    
-                    df_shap = pd.DataFrame(shap_data).sort_values('Abs_Value', ascending=False)
-                    
-                    # Create SHAP chart
-                    shap_chart = alt.Chart(df_shap).mark_bar().encode(
-                        x=alt.X('SHAP_Value:Q', title='SHAP Value (Feature Impact)'),
-                        y=alt.Y('Feature:N', sort='-x', title='Features'),
-                        color=alt.Color('Contribution:N', 
-                                      scale=alt.Scale(domain=['Positive', 'Negative'], 
-                                                    range=['#2E8B57', '#DC143C'])),
-                        tooltip=['Feature', 'SHAP_Value:Q', 'Contribution']
-                    ).properties(height=300)
-                    
-                    st.altair_chart(shap_chart, use_container_width=True)
-                    
-                    # Show feature impacts
-                    st.write("**Feature Impact Explanation:**")
-                    for _, row in df_shap.head(3).iterrows():
-                        impact = "increases" if row['SHAP_Value'] > 0 else "decreases"
-                        st.write(f"• **{row['Feature']}**: {impact} the recommendation by {abs(row['SHAP_Value']):.3f}")
-
-                except Exception as e:
-                    st.error(f"SHAP explanation failed: {e}")
-                    st.info("SHAP explanation requires additional setup. The prediction still works correctly.")
-
+                    st.warning("Grad-CAM not available for this model architecture")
+                
+                # Download report
+                st.markdown("---")
+                if st.button("📄 Generate PDF Report", type="primary"):
+                    st.info("PDF report generation feature coming soon!")
+            
             except Exception as e:
-                st.error(f"Error making prediction: {e}")
+                st.error(f"❌ Error processing image: {e}")
+                with st.expander("🔍 Error Details"):
+                    st.exception(e)
+    
+    # ========== TAB 2: YIELD PREDICTION ==========
+    with tab2:
+        st.header("📊 Crop Yield Prediction")
+        st.markdown("Enter soil and climate parameters to get AI-powered crop recommendations")
+        
+        if yield_model is None:
+            st.warning("⚠️ Yield prediction model not available")
+        else:
+            st.subheader("🌡️ Input Parameters")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.markdown("**Soil Nutrients**")
+                N = st.number_input("Nitrogen (N)", value=90.0, min_value=0.0, max_value=200.0, step=1.0)
+                P = st.number_input("Phosphorus (P)", value=42.0, min_value=0.0, max_value=150.0, step=1.0)
+                K = st.number_input("Potassium (K)", value=43.0, min_value=0.0, max_value=200.0, step=1.0)
+            
+            with col2:
+                st.markdown("**Climate Conditions**")
+                temperature = st.number_input("Temperature (°C)", value=20.9, min_value=0.0, max_value=50.0, step=0.1)
+                humidity = st.number_input("Humidity (%)", value=82.0, min_value=0.0, max_value=100.0, step=1.0)
+                rainfall = st.number_input("Rainfall (mm)", value=202.9, min_value=0.0, max_value=500.0, step=1.0)
+            
+            with col3:
+                st.markdown("**Soil Properties**")
+                pH = st.number_input("Soil pH", value=6.5, min_value=0.0, max_value=14.0, step=0.1)
+                st.markdown("&nbsp;")
+                predict_button = st.button("🚀 Get Recommendation", type="primary", use_container_width=True)
+            
+            if predict_button:
+                features = np.array([[N, P, K, temperature, humidity, pH, rainfall]])
                 
-                # Show debugging information
-                with st.expander("🔍 Debugging Information"):
-                    st.write(f"Input features shape: {features.shape}")
-                    st.write(f"Model type: {type(yield_model).__name__}")
-                    if hasattr(yield_model, 'classes_'):
-                        st.write(f"Model classes: {yield_model.classes_}")
-                    st.write(f"Error details: {str(e)}")
+                try:
+                    with st.spinner('🔄 Analyzing conditions...'):
+                        if hasattr(yield_model, 'predict_proba'):
+                            prediction = yield_model.predict(features)
+                            probabilities = yield_model.predict_proba(features)[0]
+                            
+                            predicted_crop = prediction[0]
+                            classes = yield_model.classes_
+                            
+                            st.success(f"### 🌾 Recommended Crop: **{predicted_crop}**")
+                            
+                            # Top 3 recommendations
+                            top_3_idx = np.argsort(probabilities)[-3:][::-1]
+                            
+                            st.markdown("#### Top 3 Suitable Crops")
+                            
+                            for i, idx in enumerate(top_3_idx):
+                                crop_name = classes[idx]
+                                suitability = probabilities[idx] * 100
+                                
+                                if i == 0:
+                                    st.success(f"🥇 **{crop_name}**: {suitability:.1f}% suitability")
+                                elif i == 1:
+                                    st.info(f"🥈 **{crop_name}**: {suitability:.1f}% suitability")
+                                else:
+                                    st.warning(f"🥉 **{crop_name}**: {suitability:.1f}% suitability")
+                        else:
+                            prediction = yield_model.predict(features)
+                            st.success(f"### Predicted Yield: **{prediction[0]:.2f} tons/hectare**")
+                
+                except Exception as e:
+                    st.error(f"❌ Prediction error: {e}")
+    
+    # ========== TAB 3: USER GUIDE ==========
+    with tab3:
+        st.header("📖 User Guide")
+        
+        st.markdown("""
+        ### 🎯 How to Use This System
+        
+        #### Disease Detection:
+        1. **Prepare Your Image**
+           - Use natural daylight for best results
+           - Ensure the affected leaf is clearly visible
+           - Avoid shadows and reflections
+           - Minimum recommended resolution: 800x800 pixels
+        
+        2. **Upload & Analyze**
+           - Click "Browse files" in the Disease Detection tab
+           - Select your image (JPG, PNG supported)
+           - Wait for AI analysis (usually 2-5 seconds)
+        
+        3. **Interpret Results**
+           - **Green (>70%)**: High confidence - reliable diagnosis
+           - **Yellow (50-70%)**: Moderate confidence - likely accurate
+           - **Red (<50%)**: Low confidence - consider retaking photo
+        
+        4. **Take Action**
+           - Review treatment recommendations
+           - Implement prevention measures
+           - Consult local agricultural extension if needed
+        
+        #### Yield Prediction:
+        1. Input accurate soil and climate data
+        2. Click "Get Recommendation"
+        3. Review top 3 suitable crops for your conditions
+        
+        ### ⚠️ Important Notes
+        - This is an AI assistant tool, not a replacement for professional diagnosis
+        - For severe infestations, consult agricultural experts
+        - Model accuracy: ~75% on validation data
+        - Best results with clear, well-lit images
+        
+        ### 📞 Support
+        For technical issues or questions, contact your agricultural extension service.
+        
+        ### 🔬 Model Information
+        - **Architecture**: MobileNetV2 (optimized for efficiency)
+        - **Training Dataset**: CCMT (25,000+ images)
+        - **Supported Crops**: Cashew, Cassava, Maize, Tomato
+        - **Disease Classes**: 22 (including healthy states)
+        - **Validation Accuracy**: 75.5%
+        - **Top-3 Accuracy**: 97.3%
+        """)
+        
+        st.markdown("---")
+        st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d')} | Version 2.0")
 
-# -------------------------
-# Footer
-# -------------------------
-st.markdown("---")
-st.caption("Notes: Make sure you scan your leaf for best results.")
+if __name__ == "__main__":
+    main()
