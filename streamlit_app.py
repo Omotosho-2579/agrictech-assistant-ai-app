@@ -20,7 +20,7 @@ import plotly.graph_objects as go
 # Page config
 # -------------------------
 st.set_page_config(
-    page_title="AgriTech CCMT Assistant AI", 
+    page_title="AgriTech Assistant AI", 
     layout="wide",
     page_icon="🌾",
     initial_sidebar_state="expanded"
@@ -362,7 +362,7 @@ def main():
     # Sidebar
     with st.sidebar:
         st.image("https://img.icons8.com/color/96/000000/farm.png", width=80)
-        st.title("🌾 AgriTech CCMT")
+        st.title("🌾 AgriTech AI")
         st.markdown("### AI-Powered Crop Management")
         st.markdown("---")
         
@@ -385,7 +385,7 @@ def main():
         st.caption("Powered by MobileNetV2 & TensorFlow")
     
     # Header
-    st.title("🌾 AgriTech CCMT Assistant AI")
+    st.title("🌾 AgriTech Assistant AI")
     st.markdown("### Professional Crop Disease Detection & Management System")
     st.markdown("---")
     
