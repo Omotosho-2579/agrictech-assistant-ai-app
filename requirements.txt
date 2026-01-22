@@ -9,6 +9,7 @@ matplotlib
 Pillow
 gdown
 scikit-learn==1.6.1
+plotly==5.17.0
 
 
 
