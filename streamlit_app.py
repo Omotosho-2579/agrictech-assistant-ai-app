@@ -798,6 +798,9 @@ def main():
                                 st.image(original_image, caption="Original Image", use_column_width=True)
                             with col2:
                                 st.image(overlay_img, caption="Grad-CAM Overlay (Focus Areas in Red)", use_column_width=True)
+                                
+                            # Store overlay for PDF
+                            st.session_state['gradcam_overlay'] = overlay_img
                         else:
                             st.warning("Could not generate Grad-CAM visualization")
                 else:
@@ -808,7 +811,7 @@ def main():
                 st.subheader("🔍 AI Visual Explanation (Grad-CAM)")
                 st.markdown("Highlighted regions show where the AI focused to make its decision")
                 
-                last_conv = find_last_conv_layer(disease_model)
+                last_conv = find_last_conv_layer(disease_model) if disease_model is not None else None
                 
                 if last_conv:
                     with st.spinner('Generating visual explanation...'):
