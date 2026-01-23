@@ -852,7 +852,7 @@ def main():
                     
                     st.download_button(
                         label="📥 Download PDF Report",
-                        data=pdf_buffer,
+                        data=pdf_buffer.getvalue(),
                         file_name=f"disease_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                         mime="application/pdf",
                         type="primary",
