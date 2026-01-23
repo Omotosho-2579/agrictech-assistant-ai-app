@@ -416,10 +416,41 @@ def overlay_heatmap(original_img, heatmap, alpha=0.4):
     return Image.fromarray(superimposed)
 
 def find_last_conv_layer(model):
-    """Find the last convolutional layer in the model"""
+    """Find the last convolutional layer in the model - MobileNetV2 compatible"""
+    
+    # Method 1: Look inside nested models (for MobileNetV2 base)
+    for layer in reversed(model.layers):
+        if hasattr(layer, 'layers'):  # It's a nested functional model
+            for sub_layer in reversed(layer.layers):
+                if isinstance(sub_layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
+                    # For MobileNetV2, common last layers
+                    if 'Conv_1' in sub_layer.name or 'top_conv' in sub_layer.name:
+                        return sub_layer.name
+            
+            # If we found nested model but no specific layer, return last conv-like layer
+            for sub_layer in reversed(layer.layers):
+                if isinstance(sub_layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
+                    return sub_layer.name
+    
+    # Method 2: Direct layers in the model
     for layer in reversed(model.layers):
         if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
             return layer.name
+    
+    # Method 3: Look for common MobileNetV2 layer names
+    common_last_layers = ['Conv_1', 'top_conv', 'out_relu', 'Conv1', 'block_16_project']
+    for layer_name in common_last_layers:
+        try:
+            model.get_layer(layer_name)
+            return layer_name
+        except:
+            continue
+    
+    # Method 4: Any layer with 'conv' in the name
+    for layer in reversed(model.layers):
+        if 'conv' in layer.name.lower():
+            return layer.name
+    
     return None
 
 # -------------------------
