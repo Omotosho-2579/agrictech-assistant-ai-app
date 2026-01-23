@@ -875,7 +875,7 @@ def main():
                         label="📊 Download CSV Data",
                         data=csv_buffer,
                         file_name=f"detection_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv",
+                        mime="application/pdf",
                         use_container_width=True
                     )
             
