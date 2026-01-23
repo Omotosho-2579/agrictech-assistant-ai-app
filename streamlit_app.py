@@ -548,7 +548,7 @@ def generate_pdf_report(disease_data, image_path=None):
 # -------------------------
 # Main App
 # -------------------------
-def main():
+def main():  
     # Sidebar
     with st.sidebar:
         st.image("https://img.icons8.com/color/96/000000/farm.png", width=80)
