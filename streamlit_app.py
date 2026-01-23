@@ -575,7 +575,7 @@ def main():
         st.caption("Powered by MobileNetV2 & TensorFlow")
     
     # Header
-    st.title("🌾 AgriTech CCMT Assistant AI")
+    st.title("🌾 AgriTech Assistant AI")
     st.markdown("### Professional Crop Disease Detection & Management System")
     st.markdown("---")
     
@@ -855,7 +855,6 @@ def main():
                         data=pdf_buffer.getvalue(),
                         file_name=f"disease_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                         mime="application/pdf",
-                        type="primary",
                         use_container_width=True
                     )
                 
@@ -875,7 +874,7 @@ def main():
                         label="📊 Download CSV Data",
                         data=csv_buffer,
                         file_name=f"detection_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="application/pdf",
+                        mime="text/csv",
                         use_container_width=True
                     )
             
