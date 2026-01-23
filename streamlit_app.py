@@ -7,6 +7,14 @@ import os
 import joblib
 import json
 from datetime import datetime
+import io
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+import base64
 
 # TensorFlow and suppress verbose logging
 import tensorflow as tf
@@ -15,12 +23,21 @@ tf.get_logger().setLevel('ERROR')
 # Visualization
 import altair as alt
 import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+
+# SHAP for explainability
+try:
+    import shap
+    SHAP_AVAILABLE = True
+except ImportError:
+    SHAP_AVAILABLE = False
+    st.warning("SHAP not available. Install with: pip install shap")
 
 # -------------------------
 # Page config
 # -------------------------
 st.set_page_config(
-    page_title="AgriTech Assistant AI", 
+    page_title="AgriTech CCMT Assistant AI", 
     layout="wide",
     page_icon="🌾",
     initial_sidebar_state="expanded"
@@ -348,6 +365,56 @@ def overlay_heatmap(original_img, heatmap, alpha=0.4):
     
     return Image.fromarray(superimposed)
 
+# -------------------------
+# Grad-CAM Visualization
+# -------------------------
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
+    """Generate Grad-CAM heatmap"""
+    try:
+        grad_model = tf.keras.models.Model(
+            [model.inputs],
+            [model.get_layer(last_conv_layer_name).output, model.output]
+        )
+        
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model(img_array)
+            if pred_index is None:
+                pred_index = tf.argmax(predictions[0])
+            class_channel = predictions[:, pred_index]
+        
+        grads = tape.gradient(class_channel, conv_outputs)
+        
+        if grads is None:
+            return None
+        
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        conv_outputs = conv_outputs[0]
+        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+        heatmap = tf.squeeze(heatmap)
+        
+        heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+        return heatmap.numpy()
+    
+    except Exception as e:
+        st.warning(f"Grad-CAM generation failed: {e}")
+        return None
+
+def overlay_heatmap(original_img, heatmap, alpha=0.4):
+    """Overlay heatmap on original image"""
+    # Resize heatmap to original image size
+    heatmap = cv2.resize(heatmap, (original_img.width, original_img.height))
+    heatmap = np.uint8(255 * heatmap)
+    
+    # Apply colormap
+    heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+    
+    # Overlay on original
+    original_array = np.array(original_img)
+    superimposed = cv2.addWeighted(original_array, 1-alpha, heatmap_colored, alpha, 0)
+    
+    return Image.fromarray(superimposed)
+
 def find_last_conv_layer(model):
     """Find the last convolutional layer in the model"""
     for layer in reversed(model.layers):
@@ -356,13 +423,135 @@ def find_last_conv_layer(model):
     return None
 
 # -------------------------
+# PDF Report Generation
+# -------------------------
+def generate_pdf_report(disease_data, image_path=None):
+    """Generate PDF report for disease detection"""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=0.5*inch, bottomMargin=0.5*inch)
+    story = []
+    styles = getSampleStyleSheet()
+    
+    # Custom styles
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        textColor=colors.HexColor('#1E3A8A'),
+        spaceAfter=30,
+        alignment=TA_CENTER
+    )
+    
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=16,
+        textColor=colors.HexColor('#2563EB'),
+        spaceAfter=12,
+        spaceBefore=12
+    )
+    
+    # Title
+    story.append(Paragraph("🌾 AgriTech CCMT - Disease Detection Report", title_style))
+    story.append(Spacer(1, 0.2*inch))
+    
+    # Report metadata
+    report_date = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    story.append(Paragraph(f"<b>Report Generated:</b> {report_date}", styles['Normal']))
+    story.append(Spacer(1, 0.3*inch))
+    
+    # Detection Results
+    story.append(Paragraph("Detection Results", heading_style))
+    
+    results_data = [
+        ['Parameter', 'Value'],
+        ['Detected Disease', disease_data['disease']],
+        ['Crop Type', disease_data['crop']],
+        ['Confidence Level', f"{disease_data['confidence']:.1f}%"],
+        ['Severity', disease_data['severity']],
+    ]
+    
+    results_table = Table(results_data, colWidths=[3*inch, 3*inch])
+    results_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2563EB')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 12),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ('FONTNAME', (0, 1), (0, -1), 'Helvetica-Bold'),
+    ]))
+    
+    story.append(results_table)
+    story.append(Spacer(1, 0.3*inch))
+    
+    # Treatment Recommendations
+    story.append(Paragraph("Treatment Recommendations", heading_style))
+    story.append(Paragraph(disease_data['treatment'], styles['Normal']))
+    story.append(Spacer(1, 0.2*inch))
+    
+    # Prevention Measures
+    story.append(Paragraph("Prevention Measures", heading_style))
+    story.append(Paragraph(disease_data['prevention'], styles['Normal']))
+    story.append(Spacer(1, 0.3*inch))
+    
+    # Top Predictions
+    if 'top_predictions' in disease_data and disease_data['top_predictions']:
+        story.append(Paragraph("Top 5 Alternative Diagnoses", heading_style))
+        
+        pred_data = [['Rank', 'Disease', 'Confidence']]
+        for i, pred in enumerate(disease_data['top_predictions'], 1):
+            pred_data.append([str(i), pred['Disease'], pred['Confidence']])
+        
+        pred_table = Table(pred_data, colWidths=[1*inch, 3.5*inch, 1.5*inch])
+        pred_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#10B981')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 11),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ]))
+        
+        story.append(pred_table)
+        story.append(Spacer(1, 0.3*inch))
+    
+    # Disclaimer
+    story.append(Spacer(1, 0.4*inch))
+    disclaimer_style = ParagraphStyle(
+        'Disclaimer',
+        parent=styles['Normal'],
+        fontSize=9,
+        textColor=colors.grey,
+        alignment=TA_LEFT
+    )
+    story.append(Paragraph(
+        "<b>Disclaimer:</b> This AI-powered diagnosis is provided as a decision support tool. "
+        "For severe infestations or uncertain diagnoses, please consult local agricultural extension services or plant pathologists. "
+        "Model accuracy: 75.5% (validation). Results may vary based on image quality and environmental factors.",
+        disclaimer_style
+    ))
+    
+    # Footer
+    story.append(Spacer(1, 0.2*inch))
+    footer_style = ParagraphStyle('Footer', parent=styles['Normal'], fontSize=8, alignment=TA_CENTER)
+    story.append(Paragraph("Powered by AgriTech CCMT AI | MobileNetV2 Deep Learning Model", footer_style))
+    
+    # Build PDF
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+# -------------------------
 # Main App
 # -------------------------
-def main():
     # Sidebar
     with st.sidebar:
         st.image("https://img.icons8.com/color/96/000000/farm.png", width=80)
-        st.title("🌾 AgriTech AI")
+        st.title("🌾 AgriTech CCMT")
         st.markdown("### AI-Powered Crop Management")
         st.markdown("---")
         
@@ -385,7 +574,7 @@ def main():
         st.caption("Powered by MobileNetV2 & TensorFlow")
     
     # Header
-    st.title("🌾 AgriTech Assistant AI")
+    st.title("🌾 AgriTech CCMT Assistant AI")
     st.markdown("### Professional Crop Disease Detection & Management System")
     st.markdown("---")
     
@@ -613,10 +802,81 @@ def main():
                 else:
                     st.warning("Grad-CAM not available for this model architecture")
                 
+                # Grad-CAM visualization
+                st.markdown("---")
+                st.subheader("🔍 AI Visual Explanation (Grad-CAM)")
+                st.markdown("Highlighted regions show where the AI focused to make its decision")
+                
+                last_conv = find_last_conv_layer(disease_model)
+                
+                if last_conv:
+                    with st.spinner('Generating visual explanation...'):
+                        heatmap = make_gradcam_heatmap(img_array, disease_model, last_conv, pred_idx)
+                        
+                        if heatmap is not None:
+                            overlay_img = overlay_heatmap(original_image, heatmap, alpha=0.5)
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.image(original_image, caption="Original Image", use_column_width=True)
+                            with col2:
+                                st.image(overlay_img, caption="Grad-CAM Overlay (Focus Areas in Red)", use_column_width=True)
+                            
+                            # Store overlay for PDF
+                            st.session_state['gradcam_overlay'] = overlay_img
+                        else:
+                            st.warning("Could not generate Grad-CAM visualization")
+                else:
+                    st.warning("Grad-CAM not available for this model architecture")
+                
                 # Download report
                 st.markdown("---")
-                if st.button("📄 Generate PDF Report", type="primary"):
-                    st.info("PDF report generation feature coming soon!")
+                st.subheader("📄 Download Report")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Prepare data for PDF
+                    pdf_data = {
+                        'disease': disease.replace('_', ' ').title(),
+                        'crop': crop.title(),
+                        'confidence': confidence,
+                        'severity': disease_info['severity'],
+                        'treatment': disease_info['treatment'],
+                        'prevention': disease_info['prevention'],
+                        'top_predictions': top_predictions
+                    }
+                    
+                    pdf_buffer = generate_pdf_report(pdf_data)
+                    
+                    st.download_button(
+                        label="📥 Download PDF Report",
+                        data=pdf_buffer,
+                        file_name=f"disease_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                        mime="application/pdf",
+                        type="primary",
+                        use_container_width=True
+                    )
+                
+                with col2:
+                    # CSV export
+                    csv_data = pd.DataFrame([{
+                        'Timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'Crop': crop.title(),
+                        'Disease': disease.replace('_', ' ').title(),
+                        'Confidence': f"{confidence:.2f}%",
+                        'Severity': disease_info['severity']
+                    }])
+                    
+                    csv_buffer = csv_data.to_csv(index=False)
+                    
+                    st.download_button(
+                        label="📊 Download CSV Data",
+                        data=csv_buffer,
+                        file_name=f"detection_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
             
             except Exception as e:
                 st.error(f"❌ Error processing image: {e}")
@@ -739,6 +999,7 @@ def main():
         - **Disease Classes**: 22 (including healthy states)
         - **Validation Accuracy**: 75.5%
         - **Top-3 Accuracy**: 97.3%
+        - **This Project was design and implemented by Mohammed Abdulrafiu Omotosho
         """)
         
         st.markdown("---")
