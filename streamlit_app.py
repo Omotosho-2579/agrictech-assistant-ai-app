@@ -392,6 +392,40 @@ def overlay_heatmap(original_img, heatmap, alpha=0.4):
 
 # Grad-CAM helpers 
 
+def list_conv_layer_names(model):
+    """
+    Return a list of convolutional layer names (Conv2D / DepthwiseConv2D) found in the model.
+    This function searches top-level layers and recursively searches nested submodels/wrappers.
+    The returned list preserves discovery order (shallow to deep).
+    """
+    conv_types = (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)
+    found = []
+
+    def _collect(layer):
+        names = []
+        # If the layer itself is a conv type, record it
+        if isinstance(layer, conv_types):
+            names.append(layer.name)
+        # If the layer contains sub-layers, recurse
+        if hasattr(layer, "layers") and getattr(layer, "layers"):
+            for sub in layer.layers:
+                names.extend(_collect(sub))
+        return names
+
+    # Start from top-level model (which is itself a layer-like object)
+    for layer in model.layers:
+        found.extend(_collect(layer))
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_names = []
+    for n in found:
+        if n not in seen:
+            seen.add(n)
+            unique_names.append(n)
+    return unique_names
+
+
 def find_last_conv_layer(model):
     """
     Return the name of the last convolutional (Conv2D or DepthwiseConv2D) layer found
