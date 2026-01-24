@@ -11,10 +11,9 @@ import io
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib import colors
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
-import base64
 
 # TensorFlow and suppress verbose logging
 import tensorflow as tf
@@ -23,15 +22,6 @@ tf.get_logger().setLevel('ERROR')
 # Visualization
 import altair as alt
 import plotly.graph_objects as go
-import matplotlib.pyplot as plt
-
-# SHAP for explainability
-try:
-    import shap
-    SHAP_AVAILABLE = True
-except ImportError:
-    SHAP_AVAILABLE = False
-    st.warning("SHAP not available. Install with: pip install shap")
 
 # -------------------------
 # Page config
@@ -103,11 +93,9 @@ def load_ccmt_class_names():
     if os.path.exists(class_indices_path):
         with open(class_indices_path, 'r') as f:
             class_indices = json.load(f)
-        # Reverse to get idx->name mapping
         idx_to_class = {v: k for k, v in class_indices.items()}
         return idx_to_class
     else:
-        # Fallback: Default CCMT classes
         st.warning("class_indices.json not found. Using default CCMT classes.")
         return {
             0: 'Cashew_anthracnose', 1: 'Cashew_gumosis', 2: 'Cashew_healthy',
@@ -208,14 +196,11 @@ def load_disease_model():
     
     try:
         model = tf.keras.models.load_model(model_path, compile=False)
-        
-        # Recompile with appropriate metrics
         model.compile(
             optimizer='adam',
             loss='categorical_crossentropy',
             metrics=['accuracy']
         )
-        
         st.success("✅ CCMT Disease Detection Model loaded successfully")
         return model
     except Exception as e:
@@ -244,10 +229,8 @@ def load_yield_model():
 # -------------------------
 def enhance_image(img: Image.Image):
     """Enhanced image preprocessing for better accuracy"""
-    # Convert to RGB
     img = img.convert('RGB')
     
-    # Apply enhancements
     enhancer = ImageEnhance.Sharpness(img)
     img = enhancer.enhance(1.3)
     
@@ -261,17 +244,10 @@ def enhance_image(img: Image.Image):
 
 def preprocess_image(img: Image.Image, size=(224, 224)):
     """Preprocess image for CCMT model"""
-    # Enhance image
     img = enhance_image(img)
-    
-    # Resize with high quality
     img_resized = img.resize(size, Image.Resampling.LANCZOS)
-    
-    # Convert to array and normalize
     img_array = np.array(img_resized).astype(np.float32)
-    img_array = img_array / 255.0  # Normalize to [0, 1]
-    
-    # Add batch dimension
+    img_array = img_array / 255.0
     img_array = np.expand_dims(img_array, axis=0)
     
     return img_array, img_resized
@@ -280,7 +256,6 @@ def assess_image_quality(img: Image.Image):
     """Assess uploaded image quality"""
     img_array = np.array(img.convert('RGB'))
     
-    # Calculate metrics
     brightness = np.mean(img_array)
     contrast = np.std(img_array)
     sharpness = cv2.Laplacian(cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY), cv2.CV_64F).var()
@@ -288,7 +263,6 @@ def assess_image_quality(img: Image.Image):
     quality_score = 0
     issues = []
     
-    # Brightness check
     if 80 <= brightness <= 180:
         quality_score += 33
     else:
@@ -297,13 +271,11 @@ def assess_image_quality(img: Image.Image):
         else:
             issues.append("Image is too bright")
     
-    # Contrast check
     if contrast > 25:
         quality_score += 33
     else:
         issues.append("Image has low contrast")
     
-    # Sharpness check
     if sharpness > 100:
         quality_score += 34
     else:
@@ -315,239 +287,6 @@ def assess_image_quality(img: Image.Image):
         'sharpness': sharpness
     }
 
-
-# -------------------------
-# Grad-CAM Visualization
-# -------------------------
-def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
-    """Generate Grad-CAM heatmap - handles nested MobileNetV2"""
-    try:
-        # For nested models like MobileNetV2, we need to access the base model
-        base_model_layer = None
-        
-        # Find the MobileNetV2 base model
-        for layer in model.layers:
-            if 'mobilenet' in layer.name.lower():
-                base_model_layer = layer
-                break
-        
-        if base_model_layer is None:
-            return None
-        
-        # Get the last convolutional layer from the base model
-        last_conv_layer = None
-        for layer in reversed(base_model_layer.layers):
-            if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
-                last_conv_layer = layer
-                break
-        
-        if last_conv_layer is None:
-            return None
-        
-        # Create gradient model
-        grad_model = tf.keras.models.Model(
-            [model.inputs],
-            [last_conv_layer.output, model.output]
-        )
-        
-        with tf.GradientTape() as tape:
-            conv_outputs, predictions = grad_model(img_array)
-            if pred_index is None:
-                pred_index = tf.argmax(predictions[0])
-            class_channel = predictions[:, pred_index]
-        
-        grads = tape.gradient(class_channel, conv_outputs)
-        
-        if grads is None:
-            return None
-        
-        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        conv_outputs = conv_outputs[0]
-        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-        heatmap = tf.squeeze(heatmap)
-        
-        heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
-        return heatmap.numpy()
-    
-    except Exception as e:
-        st.warning(f"Grad-CAM generation failed: {e}")
-        return None
-
-def overlay_heatmap(original_img, heatmap, alpha=0.4):
-    """Overlay heatmap on original image"""
-    # Resize heatmap to original image size
-    heatmap = cv2.resize(heatmap, (original_img.width, original_img.height))
-    heatmap = np.uint8(255 * heatmap)
-    
-    # Apply colormap
-    heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
-    
-    # Overlay on original
-    original_array = np.array(original_img)
-    superimposed = cv2.addWeighted(original_array, 1-alpha, heatmap_colored, alpha, 0)
-    
-    return Image.fromarray(superimposed)
-
-
-# Grad-CAM helpers 
-
-def list_conv_layer_names(model):
-    """
-    Return a list of convolutional layer names (Conv2D / DepthwiseConv2D) found in the model.
-    This function searches top-level layers and recursively searches nested submodels/wrappers.
-    The returned list preserves discovery order (shallow to deep).
-    """
-    conv_types = (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)
-    found = []
-
-    def _collect(layer):
-        names = []
-        # If the layer itself is a conv type, record it
-        if isinstance(layer, conv_types):
-            names.append(layer.name)
-        # If the layer contains sub-layers, recurse
-        if hasattr(layer, "layers") and getattr(layer, "layers"):
-            for sub in layer.layers:
-                names.extend(_collect(sub))
-        return names
-
-    # Start from top-level model (which is itself a layer-like object)
-    for layer in model.layers:
-        found.extend(_collect(layer))
-
-    # Deduplicate while preserving order
-    seen = set()
-    unique_names = []
-    for n in found:
-        if n not in seen:
-            seen.add(n)
-            unique_names.append(n)
-    return unique_names
-
-
-def find_last_conv_layer(model):
-    """
-    Return the name of the last convolutional (Conv2D or DepthwiseConv2D) layer found
-    in the model (searches top-level and nested layers). Returns None if none found.
-    """
-    conv_names = list_conv_layer_names(model)
-    if not conv_names:
-        return None
-    # Prefer the last discovered layer (most deep conv layer)
-    return conv_names[-1]
-
-
-def resolve_layer_output_tensor(model, layer_name):
-    """
-    Resolve a layer output tensor that is connected to the top-level model inputs.
-    Returns the symbolic tensor or raises ValueError.
-    """
-    # 1) Try direct lookup on top-level model
-    try:
-        layer = model.get_layer(layer_name)
-        # If this succeeds, layer.output should be connected to model.inputs
-        return layer.output
-    except Exception:
-        pass
-
-    # 2) Try searching nested submodels (common for MobileNetV2 wrapped as a layer)
-    for layer in model.layers:
-        if hasattr(layer, 'layers'):
-            try:
-                sub = layer.get_layer(layer_name)
-                # sub.output is symbolic within the nested model. But if the nested model instance
-                # is the same object used in the top-level model, this tensor is typically usable
-                # as an output in a top-level Model([...], [sub.output, model.output]).
-                return sub.output
-            except Exception:
-                continue
-
-    # 3) Not found in ways we can safely use
-    raise ValueError(f"Could not find a layer output tensor for '{layer_name}' that is connected to the top-level model.")
-
-
-def make_gradcam_heatmap(img_array, model, last_conv_layer_name=None, pred_index=None):
-    """
-    Robust Grad-CAM heatmap generation.
-    - img_array: (1, H, W, 3) float32 in [0,1]
-    - model: top-level Keras Model
-    - last_conv_layer_name: optional string. If None, auto-detect last conv layer.
-    - pred_index: optional int class index to explain.
-    Returns numpy heatmap (H, W) normalized to [0,1] or None.
-    """
-    try:
-        # auto-detect last conv layer name if not provided
-        if last_conv_layer_name is None:
-            conv_names = list_conv_layer_names(model)
-            if not conv_names:
-                st.warning("Grad-CAM: no convolutional layers found in model.")
-                return None
-            last_conv_layer_name = conv_names[-1]  # take last by discovery order
-            # helpful info for debugging
-            st.info(f"Grad-CAM: auto-selected conv layer '{last_conv_layer_name}' from candidates: {conv_names}")
-
-        # Resolve a symbolic tensor for the target conv layer that is connected to model.inputs
-        try:
-            target_conv_output = resolve_layer_output_tensor(model, last_conv_layer_name)
-        except ValueError as e:
-            st.warning(f"Grad-CAM: {e}")
-            # show candidates to help user pick a layer manually
-            st.warning("Available conv layer names: " + ", ".join(list_conv_layer_names(model)))
-            return None
-
-        # Build a model mapping model.inputs -> [target_conv_output, model.output]
-        grad_model = tf.keras.models.Model(inputs=model.inputs, outputs=[target_conv_output, model.output])
-
-        # Ensure img_array is a float32 tensor
-        img_tensor = tf.convert_to_tensor(img_array, dtype=tf.float32)
-
-        with tf.GradientTape() as tape:
-            conv_outputs, predictions = grad_model(img_tensor, training=False)
-            if pred_index is None:
-                pred_index = tf.argmax(predictions[0])
-            # Score for the target class
-            class_channel = predictions[:, pred_index]
-
-        grads = tape.gradient(class_channel, conv_outputs)
-        if grads is None:
-            st.warning("Grad-CAM: gradients are None (unable to compute).")
-            return None
-
-        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        conv_outputs = conv_outputs[0]  # H x W x channels
-
-        # Weighted combination
-        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-        heatmap = tf.squeeze(heatmap)
-
-        # Normalize safely
-        max_val = tf.math.reduce_max(heatmap)
-        if max_val == 0:
-            return tf.zeros_like(heatmap).numpy()
-        heatmap = tf.maximum(heatmap, 0) / (max_val + 1e-10)
-
-        return heatmap.numpy()
-
-    except Exception as e:
-        st.warning(f"Grad-CAM generation failed: {e}")
-        return None
-
-
-def overlay_heatmap(original_img, heatmap, alpha=0.4):
-    """Overlay heatmap onto a PIL image and return a PIL image."""
-    try:
-        heatmap_resized = cv2.resize(heatmap, (original_img.width, original_img.height))
-        heatmap_uint8 = np.uint8(255 * heatmap_resized)
-        heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-        heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
-
-        original_array = np.array(original_img.convert('RGB'))
-        superimposed = cv2.addWeighted(original_array, 1.0 - alpha, heatmap_colored, alpha, 0)
-        return Image.fromarray(superimposed)
-    except Exception as e:
-        st.warning(f"Overlay heatmap failed: {e}")
-        return original_img
 # -------------------------
 # PDF Report Generation
 # -------------------------
@@ -558,7 +297,6 @@ def generate_pdf_report(disease_data, image_path=None):
     story = []
     styles = getSampleStyleSheet()
     
-    # Custom styles
     title_style = ParagraphStyle(
         'CustomTitle',
         parent=styles['Heading1'],
@@ -577,16 +315,13 @@ def generate_pdf_report(disease_data, image_path=None):
         spaceBefore=12
     )
     
-    # Title
     story.append(Paragraph("🌾 AgriTech CCMT - Disease Detection Report", title_style))
     story.append(Spacer(1, 0.2*inch))
     
-    # Report metadata
     report_date = datetime.now().strftime("%B %d, %Y at %I:%M %p")
     story.append(Paragraph(f"<b>Report Generated:</b> {report_date}", styles['Normal']))
     story.append(Spacer(1, 0.3*inch))
     
-    # Detection Results
     story.append(Paragraph("Detection Results", heading_style))
     
     results_data = [
@@ -613,17 +348,14 @@ def generate_pdf_report(disease_data, image_path=None):
     story.append(results_table)
     story.append(Spacer(1, 0.3*inch))
     
-    # Treatment Recommendations
     story.append(Paragraph("Treatment Recommendations", heading_style))
     story.append(Paragraph(disease_data['treatment'], styles['Normal']))
     story.append(Spacer(1, 0.2*inch))
     
-    # Prevention Measures
     story.append(Paragraph("Prevention Measures", heading_style))
     story.append(Paragraph(disease_data['prevention'], styles['Normal']))
     story.append(Spacer(1, 0.3*inch))
     
-    # Top Predictions
     if 'top_predictions' in disease_data and disease_data['top_predictions']:
         story.append(Paragraph("Top 5 Alternative Diagnoses", heading_style))
         
@@ -646,7 +378,6 @@ def generate_pdf_report(disease_data, image_path=None):
         story.append(pred_table)
         story.append(Spacer(1, 0.3*inch))
     
-    # Disclaimer
     story.append(Spacer(1, 0.4*inch))
     disclaimer_style = ParagraphStyle(
         'Disclaimer',
@@ -662,15 +393,14 @@ def generate_pdf_report(disease_data, image_path=None):
         disclaimer_style
     ))
     
-    # Footer
     story.append(Spacer(1, 0.2*inch))
     footer_style = ParagraphStyle('Footer', parent=styles['Normal'], fontSize=8, alignment=TA_CENTER)
     story.append(Paragraph("Powered by AgriTech CCMT AI | MobileNetV2 Deep Learning Model", footer_style))
     
-    # Build PDF
     doc.build(story)
     buffer.seek(0)
     return buffer
+
 # -------------------------
 # Main App
 # -------------------------
@@ -692,16 +422,16 @@ def main():
         **Features:**
         - Disease Detection (22 classes)
         - AI Confidence Scoring
-        - Visual Explanations (Grad-CAM)
         - Treatment Recommendations
         - Yield Prediction
+        - PDF Reports
         """)
         
         st.markdown("---")
         st.caption("Powered by MobileNetV2 & TensorFlow")
     
     # Header
-    st.title("🌾 AgriTech Assistant AI")
+    st.title("🌾 AgriTech CCMT Assistant AI")
     st.markdown("### Professional Crop Disease Detection & Management System")
     st.markdown("---")
     
@@ -769,7 +499,6 @@ def main():
                     
                     st.markdown("#### Image Quality Assessment")
                     
-                    # Quality score with color
                     if quality_score >= 80:
                         st.success(f"✅ Quality Score: {quality_score}/100 (Excellent)")
                     elif quality_score >= 60:
@@ -905,33 +634,6 @@ def main():
                 
                 st.plotly_chart(fig, use_container_width=True)
                 
-# Grad-CAM visualization  
-                st.markdown("---")
-                st.subheader("🔍 AI Visual Explanation (Grad-CAM)")
-                st.markdown("Highlighted regions show where the AI focused to make its decision")
-                
-                last_conv = find_last_conv_layer(disease_model) if disease_model is not None else None
-                
-                if last_conv:
-                    with st.spinner('Generating visual explanation...'):
-                        heatmap = make_gradcam_heatmap(img_array, disease_model, last_conv, pred_idx)
-                        
-                        if heatmap is not None:
-                            overlay_img = overlay_heatmap(original_image, heatmap, alpha=0.5)
-                            
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.image(original_image, caption="Original Image", use_column_width=True)
-                            with col2:
-                                st.image(overlay_img, caption="Grad-CAM Overlay (Focus Areas in Red)", use_column_width=True)
-                            
-                            # Store overlay for PDF
-                            st.session_state['gradcam_overlay'] = overlay_img
-                        else:
-                            st.warning("Could not generate Grad-CAM visualization")
-                else:
-                    st.warning("Grad-CAM not available for this model architecture")
-                
                 # Download report
                 st.markdown("---")
                 st.subheader("📄 Download Report")
@@ -1039,73 +741,74 @@ def main():
                                 suitability = probabilities[idx] * 100
                                 
                                 if i == 0:
-                                    st.success(f"🥇 **{crop_name}**: {suitability:.1f}% suitability")
-                                elif i == 1:
-                                    st.info(f"🥈 **{crop_name}**: {suitability:.1f}% suitability")
-                                else:
-                                    st.warning(f"🥉 **{crop_name}**: {suitability:.1f}% suitability")
-                        else:
-                            prediction = yield_model.predict(features)
-                            st.success(f"### Predicted Yield: **{prediction[0]:.2f} tons/hectare**")
-                
-                except Exception as e:
-                    st.error(f"❌ Prediction error: {e}")
-    
-    # ========== TAB 3: USER GUIDE ==========
-    with tab3:
-        st.header("📖 User Guide")
-        
-        st.markdown("""
-        ### 🎯 How to Use This System
-        
-        #### Disease Detection:
-        1. **Prepare Your Image**
-           - Use natural daylight for best results
-           - Ensure the affected leaf is clearly visible
-           - Avoid shadows and reflections
-           - Minimum recommended resolution: 800x800 pixels
-        
-        2. **Upload & Analyze**
-           - Click "Browse files" in the Disease Detection tab
-           - Select your image (JPG, PNG supported)
-           - Wait for AI analysis (usually 2-5 seconds)
-        
-        3. **Interpret Results**
-           - **Green (>70%)**: High confidence - reliable diagnosis
-           - **Yellow (50-70%)**: Moderate confidence - likely accurate
-           - **Red (<50%)**: Low confidence - consider retaking photo
-        
-        4. **Take Action**
-           - Review treatment recommendations
-           - Implement prevention measures
-           - Consult local agricultural extension if needed
-        
-        #### Yield Prediction:
-        1. Input accurate soil and climate data
-        2. Click "Get Recommendation"
-        3. Review top 3 suitable crops for your conditions
-        
-        ### ⚠️ Important Notes
-        - This is an AI assistant tool, not a replacement for professional diagnosis
-        - For severe infestations, consult agricultural experts
-        - Model accuracy: ~75% on validation data
-        - Best results with clear, well-lit images
-        
-        ### 📞 Support
-        For technical issues or questions, contact your agricultural extension service.
-        
-        ### 🔬 Model Information
-        - **Architecture**: MobileNetV2 (optimized for efficiency)
-        - **Training Dataset**: CCMT (25,000+ images)
-        - **Supported Crops**: Cashew, Cassava, Maize, Tomato
-        - **Disease Classes**: 22 (including healthy states)
-        - **Validation Accuracy**: 75.5%
-        - **Top-3 Accuracy**: 97.3%
-        - **This Project was design and implemented by Mohammed Abdulrafiu Omotosho
-        """)
-        
-        st.markdown("---")
-        st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d')} | Version 2.0")
+                                    st.success(f"🥇 **{crop_name}**: {suitability:. 1f}% suitability")
+elif i == 1:
+st.info(f"🥈 {crop_name}: {suitability:.1f}% suitability")
+else:
+st.warning(f"🥉 {crop_name}: {suitability:.1f}% suitability")
+else:
+prediction = yield_model.predict(features)
+st.success(f"### Predicted Yield: {prediction[0]:.2f} tons/hectare")
+except Exception as e:
+                st.error(f"❌ Prediction error: {e}")
 
-if __name__ == "__main__":
-    main()
+# ========== TAB 3: USER GUIDE ==========
+with tab3:
+    st.header("📖 User Guide")
+    
+    st.markdown("""
+    ### 🎯 How to Use This System
+    
+    #### Disease Detection:
+    1. **Prepare Your Image**
+       - Use natural daylight for best results
+       - Ensure the affected leaf is clearly visible
+       - Avoid shadows and reflections
+       - Minimum recommended resolution: 800x800 pixels
+    
+    2. **Upload & Analyze**
+       - Click "Browse files" in the Disease Detection tab
+       - Select your image (JPG, PNG supported)
+       - Wait for AI analysis (usually 2-5 seconds)
+    
+    3. **Interpret Results**
+       - **Green (>70%)**: High confidence - reliable diagnosis
+       - **Yellow (50-70%)**: Moderate confidence - likely accurate
+       - **Red (<50%)**: Low confidence - consider retaking photo
+    
+    4. **Take Action**
+       - Review treatment recommendations
+       - Implement prevention measures
+       - Download PDF report for records
+       - Consult local agricultural extension if needed
+    
+    #### Yield Prediction:
+    1. Input accurate soil and climate data
+    2. Click "Get Recommendation"
+    3. Review top 3 suitable crops for your conditions
+    
+    ### ⚠️ Important Notes
+    - This is an AI assistant tool, not a replacement for professional diagnosis
+    - For severe infestations, consult agricultural experts
+    - Model accuracy: ~75% on validation data
+    - Best results with clear, well-lit images
+    
+    ### 📞 Support
+    For technical issues or questions, contact your agricultural extension service.
+    
+    ### 🔬 Model Information
+    - **Architecture**: MobileNetV2 (optimized for efficiency)
+    - **Training Dataset**: CCMT (25,000+ images)
+    - **Supported Crops**: Cashew, Cassava, Maize, Tomato
+    - **Disease Classes**: 22 (including healthy states)
+    - **Validation Accuracy**: 75.5%
+    - **Top-3 Accuracy**: 97.3%
+    
+    ### 👨‍💻 Developer
+    **This project was designed and implemented by Mohammed Abdulrafiu Omotosho**
+    """)
+    
+    st.markdown("---")
+    st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d')} | Version 2.0")
+    if name == "main":
+main()
