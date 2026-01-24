@@ -392,18 +392,16 @@ def overlay_heatmap(original_img, heatmap, alpha=0.4):
 
 # Grad-CAM helpers 
 
-def list_conv_layer_names(model):
-    """Return a list of Conv2D/DepthwiseConv2D layer names found in the model (including nested)."""
-    names = []
-    for layer in model.layers:
-        if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
-            names.append(layer.name)
-        # nested model / functional block
-        if hasattr(layer, 'layers'):
-            for sub in layer.layers:
-                if isinstance(sub, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
-                    names.append(sub.name)
-    return names
+def find_last_conv_layer(model):
+    """
+    Return the name of the last convolutional (Conv2D or DepthwiseConv2D) layer found
+    in the model (searches top-level and nested layers). Returns None if none found.
+    """
+    conv_names = list_conv_layer_names(model)
+    if not conv_names:
+        return None
+    # Prefer the last discovered layer (most deep conv layer)
+    return conv_names[-1]
 
 
 def resolve_layer_output_tensor(model, layer_name):
