@@ -315,55 +315,6 @@ def assess_image_quality(img: Image.Image):
         'sharpness': sharpness
     }
 
-# -------------------------
-# Grad-CAM Visualization
-# -------------------------
-def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
-    """Generate Grad-CAM heatmap"""
-    try:
-        grad_model = tf.keras.models.Model(
-            [model.inputs],
-            [model.get_layer(last_conv_layer_name).output, model.output]
-        )
-        
-        with tf.GradientTape() as tape:
-            conv_outputs, predictions = grad_model(img_array)
-            if pred_index is None:
-                pred_index = tf.argmax(predictions[0])
-            class_channel = predictions[:, pred_index]
-        
-        grads = tape.gradient(class_channel, conv_outputs)
-        
-        if grads is None:
-            return None
-        
-        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        conv_outputs = conv_outputs[0]
-        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-        heatmap = tf.squeeze(heatmap)
-        
-        heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
-        return heatmap.numpy()
-    
-    except Exception as e:
-        st.warning(f"Grad-CAM generation failed: {e}")
-        return None
-
-def overlay_heatmap(original_img, heatmap, alpha=0.4):
-    """Overlay heatmap on original image"""
-    # Resize heatmap to original image size
-    heatmap = cv2.resize(heatmap, (original_img.width, original_img.height))
-    heatmap = np.uint8(255 * heatmap)
-    
-    # Apply colormap
-    heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
-    
-    # Overlay on original
-    original_array = np.array(original_img)
-    superimposed = cv2.addWeighted(original_array, 1-alpha, heatmap_colored, alpha, 0)
-    
-    return Image.fromarray(superimposed)
 
 # -------------------------
 # Grad-CAM Visualization
@@ -438,24 +389,120 @@ def overlay_heatmap(original_img, heatmap, alpha=0.4):
     
     return Image.fromarray(superimposed)
 
+# ---- Replace your existing Grad-CAM helpers with the following ----
+
 def find_last_conv_layer(model):
-    """Find the last convolutional layer in the model - MobileNetV2 compatible"""
-    
-    # Find the MobileNetV2 base model layer
-    for layer in model.layers:
-        if 'mobilenet' in layer.name.lower() and hasattr(layer, 'layers'):
-            # Found the base model, now find its last conv layer
-            for sub_layer in reversed(layer.layers):
-                if isinstance(sub_layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
-                    return sub_layer.name
-    
-    # Fallback: direct layers
+    """Find the name of the last Conv2D or DepthwiseConv2D layer in the model.
+    This scans top-level layers first, then nested submodels if present.
+    Returns the layer name or None if not found.
+    """
+    # Search top-level layers in reverse
     for layer in reversed(model.layers):
         if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
             return layer.name
-    
-    return 'mobilenetv2_1.00_224'  # Return the base model name as fallback
+        # If layer is a nested model, scan its layers
+        if hasattr(layer, 'layers'):
+            for sub_layer in reversed(layer.layers):
+                if isinstance(sub_layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
+                    return sub_layer.name
+    return None
 
+
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name=None, pred_index=None):
+    """Generate Grad-CAM heatmap robustly for nested models.
+    - img_array: numpy array or tf.Tensor with shape (1, H, W, 3) and values in [0,1]
+    - model: top-level keras Model
+    - last_conv_layer_name: optional layer name (string). If None, we auto-detect.
+    - pred_index: optional class index to explain. If None, uses model argmax.
+    Returns numpy heatmap or None on failure.
+    """
+    try:
+        # Ensure we have a layer name to look up
+        if last_conv_layer_name is None:
+            last_conv_layer_name = find_last_conv_layer(model)
+            if last_conv_layer_name is None:
+                st.warning("Grad-CAM: Could not find a convolutional layer in the model.")
+                return None
+
+        # Attempt to get the layer from the top-level model by name.
+        # This ensures the layer output is connected to model.inputs in the same graph.
+        try:
+            last_conv_layer = model.get_layer(last_conv_layer_name)
+        except ValueError:
+            # If not directly found, try searching nested models and get the layer object from them,
+            # but ensure the layer belongs to a subgraph connected to the top-level model.
+            last_conv_layer = None
+            for layer in model.layers:
+                if hasattr(layer, 'layers'):
+                    try:
+                        candidate = layer.get_layer(last_conv_layer_name)
+                        # candidate found; candidate.output may be connected through the submodel
+                        last_conv_layer = candidate
+                        break
+                    except Exception:
+                        continue
+            if last_conv_layer is None:
+                st.warning(f"Grad-CAM: Could not retrieve layer '{last_conv_layer_name}' from the model.")
+                return None
+
+        # Convert input to tf.Tensor with correct dtype
+        img_tensor = tf.convert_to_tensor(img_array, dtype=tf.float32)
+
+        # Build a model that maps the model input to the last conv layer's output and predictions
+        grad_model = tf.keras.models.Model(inputs=model.inputs, outputs=[last_conv_layer.output, model.output])
+
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model(img_tensor)
+            if pred_index is None:
+                pred_index = tf.argmax(predictions[0])
+            # Use the score for the target class
+            class_channel = predictions[:, pred_index]
+
+        # Gradient of the class score with respect to the feature map activations
+        grads = tape.gradient(class_channel, conv_outputs)
+        if grads is None:
+            st.warning("Grad-CAM: gradients are None (unable to compute).")
+            return None
+
+        # Global average pooling to get importance weights
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+        # Weighted combination of the forward activation maps
+        conv_outputs = conv_outputs[0]  # H x W x channels
+        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]  # H x W x 1
+        heatmap = tf.squeeze(heatmap)
+
+        # Normalize the heatmap to [0,1] safely
+        max_val = tf.math.reduce_max(heatmap)
+        if max_val == 0:
+            return tf.zeros_like(heatmap).numpy()
+        heatmap = tf.maximum(heatmap, 0) / (max_val + 1e-10)
+
+        return heatmap.numpy()
+
+    except Exception as e:
+        st.warning(f"Grad-CAM generation failed: {e}")
+        return None
+
+
+def overlay_heatmap(original_img, heatmap, alpha=0.4):
+    """Overlay heatmap onto the original PIL image and return a PIL image."""
+    try:
+        # Resize heatmap to original image size
+        heatmap_resized = cv2.resize(heatmap, (original_img.width, original_img.height))
+        heatmap_uint8 = np.uint8(255 * heatmap_resized)
+
+        # Apply color map
+        heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+        heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+
+        original_array = np.array(original_img.convert('RGB'))
+        superimposed = cv2.addWeighted(original_array, 1.0 - alpha, heatmap_colored, alpha, 0)
+
+        return Image.fromarray(superimposed)
+    except Exception as e:
+        st.warning(f"Overlay heatmap failed: {e}")
+        return original_img
 # -------------------------
 # PDF Report Generation
 # -------------------------
