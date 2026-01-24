@@ -369,11 +369,34 @@ def overlay_heatmap(original_img, heatmap, alpha=0.4):
 # Grad-CAM Visualization
 # -------------------------
 def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
-    """Generate Grad-CAM heatmap"""
+    """Generate Grad-CAM heatmap - handles nested MobileNetV2"""
     try:
+        # For nested models like MobileNetV2, we need to access the base model
+        base_model_layer = None
+        
+        # Find the MobileNetV2 base model
+        for layer in model.layers:
+            if 'mobilenet' in layer.name.lower():
+                base_model_layer = layer
+                break
+        
+        if base_model_layer is None:
+            return None
+        
+        # Get the last convolutional layer from the base model
+        last_conv_layer = None
+        for layer in reversed(base_model_layer.layers):
+            if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
+                last_conv_layer = layer
+                break
+        
+        if last_conv_layer is None:
+            return None
+        
+        # Create gradient model
         grad_model = tf.keras.models.Model(
             [model.inputs],
-            [model.get_layer(last_conv_layer_name).output, model.output]
+            [last_conv_layer.output, model.output]
         )
         
         with tf.GradientTape() as tape:
@@ -392,7 +415,7 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
         heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
         heatmap = tf.squeeze(heatmap)
         
-        heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+        heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
         return heatmap.numpy()
     
     except Exception as e:
@@ -418,40 +441,20 @@ def overlay_heatmap(original_img, heatmap, alpha=0.4):
 def find_last_conv_layer(model):
     """Find the last convolutional layer in the model - MobileNetV2 compatible"""
     
-    # Method 1: Look inside nested models (for MobileNetV2 base)
-    for layer in reversed(model.layers):
-        if hasattr(layer, 'layers'):  # It's a nested functional model
-            for sub_layer in reversed(layer.layers):
-                if isinstance(sub_layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
-                    # For MobileNetV2, common last layers
-                    if 'Conv_1' in sub_layer.name or 'top_conv' in sub_layer.name:
-                        return sub_layer.name
-            
-            # If we found nested model but no specific layer, return last conv-like layer
+    # Find the MobileNetV2 base model layer
+    for layer in model.layers:
+        if 'mobilenet' in layer.name.lower() and hasattr(layer, 'layers'):
+            # Found the base model, now find its last conv layer
             for sub_layer in reversed(layer.layers):
                 if isinstance(sub_layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
                     return sub_layer.name
     
-    # Method 2: Direct layers in the model
+    # Fallback: direct layers
     for layer in reversed(model.layers):
         if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
             return layer.name
     
-    # Method 3: Look for common MobileNetV2 layer names
-    common_last_layers = ['Conv_1', 'top_conv', 'out_relu', 'Conv1', 'block_16_project']
-    for layer_name in common_last_layers:
-        try:
-            model.get_layer(layer_name)
-            return layer_name
-        except:
-            continue
-    
-    # Method 4: Any layer with 'conv' in the name
-    for layer in reversed(model.layers):
-        if 'conv' in layer.name.lower():
-            return layer.name
-    
-    return None
+    return 'mobilenetv2_1.00_224'  # Return the base model name as fallback
 
 # -------------------------
 # PDF Report Generation
