@@ -873,59 +873,32 @@ def main():
                 
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Grad-CAM visualization
-                st.markdown("---")
-                st.subheader("🔍 AI Visual Explanation (Grad-CAM)")
-                st.markdown("Highlighted regions show where the AI focused to make its decision")
-                
-                last_conv = find_last_conv_layer(disease_model)
-                
-                if last_conv:
-                    with st.spinner('Generating visual explanation...'):
-                        heatmap = make_gradcam_heatmap(img_array, disease_model, last_conv, pred_idx)
-                        
-                        if heatmap is not None:
-                            overlay_img = overlay_heatmap(original_image, heatmap, alpha=0.5)
-                            
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.image(original_image, caption="Original Image", use_column_width=True)
-                            with col2:
-                                st.image(overlay_img, caption="Grad-CAM Overlay (Focus Areas in Red)", use_column_width=True)
-                                
-                            # Store overlay for PDF
-                            st.session_state['gradcam_overlay'] = overlay_img
-                        else:
-                            st.warning("Could not generate Grad-CAM visualization")
-                else:
-                    st.warning("Grad-CAM not available for this model architecture")
-                
-                # Grad-CAM visualization
-                st.markdown("---")
-                st.subheader("🔍 AI Visual Explanation (Grad-CAM)")
-                st.markdown("Highlighted regions show where the AI focused to make its decision")
-                
-                last_conv = find_last_conv_layer(disease_model) if disease_model is not None else None
-                
-                if last_conv:
-                    with st.spinner('Generating visual explanation...'):
-                        heatmap = make_gradcam_heatmap(img_array, disease_model, last_conv, pred_idx)
-                        
-                        if heatmap is not None:
-                            overlay_img = overlay_heatmap(original_image, heatmap, alpha=0.5)
-                            
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.image(original_image, caption="Original Image", use_column_width=True)
-                            with col2:
-                                st.image(overlay_img, caption="Grad-CAM Overlay (Focus Areas in Red)", use_column_width=True)
-                            
-                            # Store overlay for PDF
-                            st.session_state['gradcam_overlay'] = overlay_img
-                        else:
-                            st.warning("Could not generate Grad-CAM visualization")
-                else:
-                    st.warning("Grad-CAM not available for this model architecture")
+                 # Grad-CAM visualization
+st.markdown("---")
+st.subheader("🔍 AI Visual Explanation (Grad-CAM)")
+st.markdown("Highlighted regions show where the AI focused to make its decision")
+
+last_conv = find_last_conv_layer(disease_model) if disease_model is not None else None
+
+if last_conv:
+    with st.spinner('Generating visual explanation...'):
+        heatmap = make_gradcam_heatmap(img_array, disease_model, last_conv, pred_idx)
+        
+        if heatmap is not None:
+            overlay_img = overlay_heatmap(original_image, heatmap, alpha=0.5)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.image(original_image, caption="Original Image", use_column_width=True)
+            with col2:
+                st.image(overlay_img, caption="Grad-CAM Overlay (Focus Areas in Red)", use_column_width=True)
+            
+            # Store overlay for PDF
+            st.session_state['gradcam_overlay'] = overlay_img
+        else:
+            st.warning("Could not generate Grad-CAM visualization")
+else:
+    st.warning("Grad-CAM not available for this model architecture")
                 
                 # Download report
                 st.markdown("---")
