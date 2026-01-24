@@ -389,90 +389,107 @@ def overlay_heatmap(original_img, heatmap, alpha=0.4):
     
     return Image.fromarray(superimposed)
 
-# ---- Replace your existing Grad-CAM helpers with the following ----
 
-def find_last_conv_layer(model):
-    """Find the name of the last Conv2D or DepthwiseConv2D layer in the model.
-    This scans top-level layers first, then nested submodels if present.
-    Returns the layer name or None if not found.
-    """
-    # Search top-level layers in reverse
-    for layer in reversed(model.layers):
+# Grad-CAM helpers 
+
+def list_conv_layer_names(model):
+    """Return a list of Conv2D/DepthwiseConv2D layer names found in the model (including nested)."""
+    names = []
+    for layer in model.layers:
         if isinstance(layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
-            return layer.name
-        # If layer is a nested model, scan its layers
+            names.append(layer.name)
+        # nested model / functional block
         if hasattr(layer, 'layers'):
-            for sub_layer in reversed(layer.layers):
-                if isinstance(sub_layer, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
-                    return sub_layer.name
-    return None
+            for sub in layer.layers:
+                if isinstance(sub, (tf.keras.layers.Conv2D, tf.keras.layers.DepthwiseConv2D)):
+                    names.append(sub.name)
+    return names
+
+
+def resolve_layer_output_tensor(model, layer_name):
+    """
+    Resolve a layer output tensor that is connected to the top-level model inputs.
+    Returns the symbolic tensor or raises ValueError.
+    """
+    # 1) Try direct lookup on top-level model
+    try:
+        layer = model.get_layer(layer_name)
+        # If this succeeds, layer.output should be connected to model.inputs
+        return layer.output
+    except Exception:
+        pass
+
+    # 2) Try searching nested submodels (common for MobileNetV2 wrapped as a layer)
+    for layer in model.layers:
+        if hasattr(layer, 'layers'):
+            try:
+                sub = layer.get_layer(layer_name)
+                # sub.output is symbolic within the nested model. But if the nested model instance
+                # is the same object used in the top-level model, this tensor is typically usable
+                # as an output in a top-level Model([...], [sub.output, model.output]).
+                return sub.output
+            except Exception:
+                continue
+
+    # 3) Not found in ways we can safely use
+    raise ValueError(f"Could not find a layer output tensor for '{layer_name}' that is connected to the top-level model.")
 
 
 def make_gradcam_heatmap(img_array, model, last_conv_layer_name=None, pred_index=None):
-    """Generate Grad-CAM heatmap robustly for nested models.
-    - img_array: numpy array or tf.Tensor with shape (1, H, W, 3) and values in [0,1]
-    - model: top-level keras Model
-    - last_conv_layer_name: optional layer name (string). If None, we auto-detect.
-    - pred_index: optional class index to explain. If None, uses model argmax.
-    Returns numpy heatmap or None on failure.
+    """
+    Robust Grad-CAM heatmap generation.
+    - img_array: (1, H, W, 3) float32 in [0,1]
+    - model: top-level Keras Model
+    - last_conv_layer_name: optional string. If None, auto-detect last conv layer.
+    - pred_index: optional int class index to explain.
+    Returns numpy heatmap (H, W) normalized to [0,1] or None.
     """
     try:
-        # Ensure we have a layer name to look up
+        # auto-detect last conv layer name if not provided
         if last_conv_layer_name is None:
-            last_conv_layer_name = find_last_conv_layer(model)
-            if last_conv_layer_name is None:
-                st.warning("Grad-CAM: Could not find a convolutional layer in the model.")
+            conv_names = list_conv_layer_names(model)
+            if not conv_names:
+                st.warning("Grad-CAM: no convolutional layers found in model.")
                 return None
+            last_conv_layer_name = conv_names[-1]  # take last by discovery order
+            # helpful info for debugging
+            st.info(f"Grad-CAM: auto-selected conv layer '{last_conv_layer_name}' from candidates: {conv_names}")
 
-        # Attempt to get the layer from the top-level model by name.
-        # This ensures the layer output is connected to model.inputs in the same graph.
+        # Resolve a symbolic tensor for the target conv layer that is connected to model.inputs
         try:
-            last_conv_layer = model.get_layer(last_conv_layer_name)
-        except ValueError:
-            # If not directly found, try searching nested models and get the layer object from them,
-            # but ensure the layer belongs to a subgraph connected to the top-level model.
-            last_conv_layer = None
-            for layer in model.layers:
-                if hasattr(layer, 'layers'):
-                    try:
-                        candidate = layer.get_layer(last_conv_layer_name)
-                        # candidate found; candidate.output may be connected through the submodel
-                        last_conv_layer = candidate
-                        break
-                    except Exception:
-                        continue
-            if last_conv_layer is None:
-                st.warning(f"Grad-CAM: Could not retrieve layer '{last_conv_layer_name}' from the model.")
-                return None
+            target_conv_output = resolve_layer_output_tensor(model, last_conv_layer_name)
+        except ValueError as e:
+            st.warning(f"Grad-CAM: {e}")
+            # show candidates to help user pick a layer manually
+            st.warning("Available conv layer names: " + ", ".join(list_conv_layer_names(model)))
+            return None
 
-        # Convert input to tf.Tensor with correct dtype
+        # Build a model mapping model.inputs -> [target_conv_output, model.output]
+        grad_model = tf.keras.models.Model(inputs=model.inputs, outputs=[target_conv_output, model.output])
+
+        # Ensure img_array is a float32 tensor
         img_tensor = tf.convert_to_tensor(img_array, dtype=tf.float32)
 
-        # Build a model that maps the model input to the last conv layer's output and predictions
-        grad_model = tf.keras.models.Model(inputs=model.inputs, outputs=[last_conv_layer.output, model.output])
-
         with tf.GradientTape() as tape:
-            conv_outputs, predictions = grad_model(img_tensor)
+            conv_outputs, predictions = grad_model(img_tensor, training=False)
             if pred_index is None:
                 pred_index = tf.argmax(predictions[0])
-            # Use the score for the target class
+            # Score for the target class
             class_channel = predictions[:, pred_index]
 
-        # Gradient of the class score with respect to the feature map activations
         grads = tape.gradient(class_channel, conv_outputs)
         if grads is None:
             st.warning("Grad-CAM: gradients are None (unable to compute).")
             return None
 
-        # Global average pooling to get importance weights
         pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-        # Weighted combination of the forward activation maps
         conv_outputs = conv_outputs[0]  # H x W x channels
-        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]  # H x W x 1
+
+        # Weighted combination
+        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
         heatmap = tf.squeeze(heatmap)
 
-        # Normalize the heatmap to [0,1] safely
+        # Normalize safely
         max_val = tf.math.reduce_max(heatmap)
         if max_val == 0:
             return tf.zeros_like(heatmap).numpy()
@@ -486,19 +503,15 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name=None, pred_index
 
 
 def overlay_heatmap(original_img, heatmap, alpha=0.4):
-    """Overlay heatmap onto the original PIL image and return a PIL image."""
+    """Overlay heatmap onto a PIL image and return a PIL image."""
     try:
-        # Resize heatmap to original image size
         heatmap_resized = cv2.resize(heatmap, (original_img.width, original_img.height))
         heatmap_uint8 = np.uint8(255 * heatmap_resized)
-
-        # Apply color map
         heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
         heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
 
         original_array = np.array(original_img.convert('RGB'))
         superimposed = cv2.addWeighted(original_array, 1.0 - alpha, heatmap_colored, alpha, 0)
-
         return Image.fromarray(superimposed)
     except Exception as e:
         st.warning(f"Overlay heatmap failed: {e}")
