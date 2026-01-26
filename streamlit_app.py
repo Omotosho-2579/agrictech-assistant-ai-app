@@ -39,7 +39,7 @@ except ImportError:
 st.set_page_config(
     page_title="AgriTech CCMT Assistant AI", 
     layout="wide",
-    page_icon="🌾",
+    page_icon="",
     initial_sidebar_state="expanded"
 )
 
@@ -345,7 +345,7 @@ def generate_pdf_report(disease_data, image_path=None):
     )
     
     # Title
-    story.append(Paragraph("🌾 AgriTech CCMT - Disease Detection Report", title_style))
+    story.append(Paragraph("AgriTech CCMT - Disease Detection Report", title_style))
     story.append(Spacer(1, 0.2*inch))
     
     # Report metadata
@@ -482,7 +482,7 @@ def main():
         st.caption("Powered by MobileNetV2 & TensorFlow")
     
     # Header
-    st.title("🌾 AgriTech Assistant AI")
+    st.title("AgriTech Assistant AI")
     st.markdown("### Professional Crop Disease Detection & Management System")
     st.markdown("---")
     
