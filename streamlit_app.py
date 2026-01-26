@@ -444,8 +444,13 @@ def generate_pdf_report(disease_data, image_path=None):
 def main():  
     # Sidebar
     with st.sidebar:
-        st.image("https://img.icons8.com/color/96/000000/farm.png", width=80)
-        st.title("🌾 AgriTech CCMT")
+        # Load local logo
+        if os.path.exists("logo.png"):
+            st.image("logo.png", width=100)
+        else:
+            st.image("https://img.icons8.com/color/96/000000/farm.png", width=80)  # Fallback
+        
+        st.title("🌾 AgriTech Assistant AI")
         st.markdown("### AI-Powered Crop Management")
         st.markdown("---")
         
@@ -461,9 +466,19 @@ def main():
         - AI Confidence Scoring
         - Treatment Recommendations
         - Yield Prediction
+        - PDF Reports
         """)
         
         st.markdown("---")
+        
+        # Add developer branding
+        st.markdown("""
+        <div style='text-align: center; padding: 1rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 0.5rem; color: white; margin: 1rem 0;'>
+            <p style='margin: 0; font-size: 0.85rem;'>Developed by</p>
+            <p style='margin: 0; font-size: 1rem; font-weight: bold;'>Mohammed A. Omotosho</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
         st.caption("Powered by MobileNetV2 & TensorFlow")
     
     # Header
